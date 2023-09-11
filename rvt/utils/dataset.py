@@ -157,6 +157,78 @@ def create_replay(
     return replay_buffer
 
 
+def create_act_replay(
+    batch_size: int,
+    timesteps: int,
+    disk_saving: bool,
+    cameras: list,
+    replay_size=3e5,
+):
+
+    gripper_pose_size = 7
+    observation_elements = []
+
+    # rgb, intrinsics, extrinsics
+    for cname in cameras:
+        observation_elements.append(
+            ObservationElement(
+                "%s_rgb" % cname,
+                (
+                    3,
+                    IMAGE_SIZE,
+                    IMAGE_SIZE,
+                ),
+                np.float32,
+            )
+        )
+        observation_elements.append(
+            ObservationElement(
+                "%s_camera_extrinsics" % cname,
+                (
+                    4,
+                    4,
+                ),
+                np.float32,
+            )
+        )
+        observation_elements.append(
+            ObservationElement(
+                "%s_camera_intrinsics" % cname,
+                (
+                    3,
+                    3,
+                ),
+                np.float32,
+            )
+        )
+
+    # gripper_pose, target_pose and target_actions.
+    observation_elements.extend(
+        [
+            ReplayElement("gripper_pose", (gripper_pose_size,), np.float32),
+            ReplayElement("target_pose", (gripper_pose_size,), np.float32),
+            ReplayElement("target_actions", (20, gripper_pose_size), np.float32),
+            ReplayElement("is_pad", (20,), bool),
+        ]
+    )
+
+    replay_buffer = (
+        UniformReplayBuffer(  # all tuples in the buffer have equal sample weighting
+            disk_saving=disk_saving,
+            batch_size=batch_size,
+            timesteps=timesteps,
+            replay_capacity=int(replay_size),
+            action_shape=(20, gripper_pose_size), # Same as target_actions
+            action_dtype=np.float32,
+            reward_shape=(),
+            reward_dtype=np.float32,
+            update_horizon=1,
+            observation_elements=observation_elements,
+        )
+    )
+    return replay_buffer
+
+
 # discretize translation, rotation, gripper open, and ignore collision actions
 def _get_action(
     obs_tp1: Observation,
@@ -343,7 +415,9 @@ def fill_replay(
     clip_model=None,
     device="cpu",
 ):
-
+    print("Replay disk saving:", replay._disk_saving)
+    print("Storage:", task_replay_storage_folder)
+    print("data_path", data_path)
     disk_exist = False
     if replay._disk_saving:
         if os.path.exists(task_replay_storage_folder):
@@ -428,3 +502,143 @@ def fill_replay(
             )
 
         print("Replay filled with demos.")
+
+
+# Duplicating to avoid modifying source code. TODO: Merge both logics into a single function.
+def fill_act_replay(
+    replay: ReplayBuffer,
+    task: str,
+    task_replay_storage_folder: str,
+    start_idx: int,
+    num_demos: int,
+    data_path: str,
+    action_chunk_size: str,
+):
+    print("Replay disk saving:", replay._disk_saving)
+    print("Storage:", task_replay_storage_folder)
+    print("data_path", data_path)
+    disk_exist = False
+    if replay._disk_saving:
+        if os.path.exists(task_replay_storage_folder):
+            print(
+                "[Info] Replay dataset already exists in the disk: {}".format(
+                    task_replay_storage_folder
+                ),
+                flush=True,
+            )
+            disk_exist = True
+        else:
+            logging.info("\t saving to disk: %s", task_replay_storage_folder)
+            os.makedirs(task_replay_storage_folder, exist_ok=True)
+
+    if disk_exist:
+        replay.recover_from_disk(task, task_replay_storage_folder)
+    else:
+        print("Filling act replay ...")
+        for d_idx in range(start_idx, start_idx + num_demos):
+            print("Filling demo %d" % d_idx)
+            demo = get_stored_demo(data_path=data_path, index=d_idx)
+
+            # extract keypoints
+            episode_keypoints = keypoint_discovery(demo)
+            _add_gripper_poses(
+                replay,
+                task,
+                task_replay_storage_folder,
+                demo,
+                episode_keypoints,
+                action_chunk_size
+            )
+
+        # save TERMINAL info in replay_info.npy
+        task_idx = replay._task_index[task]
+        with open(
+            os.path.join(task_replay_storage_folder, "replay_info.npy"), "wb"
+        ) as fp:
+            np.save(
+                fp,
+                replay._store["terminal"][
+                    replay._task_replay_start_index[
+                        task_idx
+                    ] : replay._task_replay_start_index[task_idx]
+                    + replay._task_add_count[task_idx].value
+                ],
+            )
+
+        print("Replay filled with demos.")
+
+
+# add gripper poses to replay
+def _add_gripper_poses(
+    replay: ReplayBuffer,
+    task: str,
+    task_replay_storage_folder: str,
+    demo: Demo,
+    episode_keypoints: List[int],
+    action_chunk_size: int,
+):
+    k = 0
+    for i in range(len(demo) - 1):  # Excluding the last observation
+        obs = demo[i]
+        # Update the keypoint when we cross the next_keypoint_idx
+        if i == episode_keypoints[k]:
+            if k < len(episode_keypoints) - 1:
+                k += 1
+        obs_dict = extract_camera_data(obs, CAMERAS)
+
+        # Fill actions_chunk
+        last_index = min(i + action_chunk_size, len(demo))
+        target_actions = [i.gripper_pose for i in demo[i:last_index]]
+        is_pad = [False] * len(target_actions)
+        # Ensure target_actions size is action_chunk_size
+        difference = action_chunk_size - len(target_actions)
+        target_actions += [target_actions[-1]] * difference
+        # Padding to true as we are filling with duplicated data.
+        is_pad += [True] * difference
+
+        final_obs = {
+            "gripper_pose": obs.gripper_pose,
+            "target_pose": demo[episode_keypoints[k]].gripper_pose,
+            "target_actions": target_actions,
+            "is_pad": is_pad
+        }
+
+        obs_dict.update(final_obs)
+
+        terminal = k == len(episode_keypoints) - 1
+        reward = float(terminal) * 1.0 if terminal else 0
+        timeout = False
+        replay.add(
+            task,
+            task_replay_storage_folder,
+            action=target_actions,
+            reward=reward,
+            terminal=terminal,
+            timeout=timeout,
+            **obs_dict
+        )
+    # Handling the final observation:
+    obs_dict = extract_camera_data(demo[-1], CAMERAS)
+    final_obs = {
+        "gripper_pose": demo[-1].gripper_pose,
+        "target_pose": demo[episode_keypoints[-1]].gripper_pose,  # I assume the last keypoint is relevant
+        "target_actions": [demo[-1].gripper_pose] * action_chunk_size,  # Repeating the last action, but adjust if needed
+        "is_pad": [True] + [False] * (action_chunk_size - 1)
+    }
+    obs_dict.update(final_obs)
+    replay.add_final(task, task_replay_storage_folder, **obs_dict)
+
+
+def extract_camera_data(
+    obs: Observation,
+    cameras
+):
+    obs_dict = vars(obs)
+    obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
+    camera_obs_dict = {}
+
+    for camera_name in cameras:
+        camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
+        camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
+
+    return camera_obs_dict
