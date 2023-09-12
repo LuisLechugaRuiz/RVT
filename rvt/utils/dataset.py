@@ -15,6 +15,7 @@ from typing import List
 
 import clip
 import peract_colab.arm.utils as utils
+import rvt.mvt.aug_utils as aug_utils
 
 from peract_colab.rlbench.utils import get_stored_demo
 from yarr.utils.observation_type import ObservationElement
@@ -585,10 +586,9 @@ def _add_gripper_poses(
             if k < len(episode_keypoints) - 1:
                 k += 1
         obs_dict = extract_camera_data(obs, CAMERAS)
-
         # Fill actions_chunk
         last_index = min(i + action_chunk_size, len(demo))
-        target_actions = [i.gripper_pose for i in demo[i:last_index]]
+        target_actions = [to_action(i) for i in demo[i:last_index]]
         is_pad = [False] * len(target_actions)
         # Ensure target_actions size is action_chunk_size
         difference = action_chunk_size - len(target_actions)
@@ -597,12 +597,11 @@ def _add_gripper_poses(
         is_pad += [True] * difference
 
         final_obs = {
-            "gripper_pose": obs.gripper_pose,
-            "target_pose": demo[episode_keypoints[k]].gripper_pose,
+            "gripper_pose": to_action(obs),
+            "target_pose": to_action(demo[episode_keypoints[k]]),
             "target_actions": target_actions,
             "is_pad": is_pad
         }
-
         obs_dict.update(final_obs)
 
         terminal = k == len(episode_keypoints) - 1
@@ -620,13 +619,21 @@ def _add_gripper_poses(
     # Handling the final observation:
     obs_dict = extract_camera_data(demo[-1], CAMERAS)
     final_obs = {
-        "gripper_pose": demo[-1].gripper_pose,
-        "target_pose": demo[episode_keypoints[-1]].gripper_pose,  # I assume the last keypoint is relevant
-        "target_actions": [demo[-1].gripper_pose] * action_chunk_size,  # Repeating the last action, but adjust if needed
+        "gripper_pose": to_action(demo[-1]),
+        "target_pose": to_action(demo[episode_keypoints[-1]]),
+        "target_actions": [to_action(demo[-1])] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1)
     }
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
+
+
+def to_action(sample):
+    quat = utils.normalize_quaternion(sample.gripper_pose[3:])
+    if quat[-1] < 0:
+        quat = -quat
+    euler_rot = aug_utils.quaternion_to_euler_rad(quat)
+    return np.concatenate([sample.gripper_pose[:3], euler_rot, np.array([int(sample.gripper_open)])])
 
 
 def extract_camera_data(
@@ -636,8 +643,10 @@ def extract_camera_data(
     obs_dict = vars(obs)
     obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
     camera_obs_dict = {}
-
+    obs_dict = {k: np.transpose(v, [2, 0, 1]) if v.ndim == 3 else np.expand_dims(v, 0)
+                for k, v in obs_dict.items() if isinstance(v, (np.ndarray, list))}
     for camera_name in cameras:
+        camera_obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name]
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 

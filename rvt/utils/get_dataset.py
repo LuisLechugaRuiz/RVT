@@ -178,7 +178,6 @@ def get_act_dataset(
         if training:
             folder = "train"
         else:
-            print("DEBUG - TESTING")
             folder = "test"
         EPISODES_FOLDER = f"{folder}/{task}/all_variations/episodes"
         data_path = os.path.join(data_folder, EPISODES_FOLDER)
