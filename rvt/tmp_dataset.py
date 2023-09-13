@@ -35,36 +35,34 @@ class ACTDataset:
             num_workers,
             training=training,
         )
-        self.norm_stats = self.get_norm_stats(
-            dataset=self.dataset.dataset,
-            training_iterations=training_iterations,
-            ckpt_dir=ckpt_dir,
-        )
+        # TODO: Enable normalization
+        # self.norm_stats = self.get_norm_stats(
+        #    dataset=self.dataset.dataset,
+        #    training_iterations=training_iterations,
+        #    ckpt_dir=ckpt_dir,
+        #)
 
     def get_data(self, sample):
-        qpos = torch.from_numpy(sample["gripper_pose"].squeeze(1))
-        target_pose = torch.from_numpy(sample["target_pose"].squeeze(1))
-        action = torch.from_numpy(sample["target_actions"].squeeze(1))
+        qpos = torch.from_numpy(sample["qpos"].squeeze(1))
+        actions = torch.from_numpy(sample["actions"].squeeze(1))
         is_pad = torch.from_numpy(sample["is_pad"].squeeze(1))
         # new axis for different cameras
         all_cam_images = []
         for cam_name in CAMERAS:
-            rgb = torch.from_numpy(sample["%s_rgb" % cam_name].squeeze(1))
-            all_cam_images.append(rgb)
+            rgba = torch.from_numpy(sample["%s_rgba" % cam_name].squeeze(1))
+            all_cam_images.append(rgba)
         # construct observations
         image_data = torch.stack(all_cam_images, axis=1)
 
-        # normalize image and change dtype to float
-        image_data = image_data / 255.0
-        qpos = (qpos - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
-        target_pose = (
-            target_pose - self.norm_stats["target_pose_mean"]
-        ) / self.norm_stats["target_pose_std"]
-        action = (action - self.norm_stats["action_mean"]) / self.norm_stats[
-            "action_std"
-        ]
+        # normalize only RGB channels
+        image_data[:, :, :3, :, :] = image_data[:, :, :3, :, :] / 255.0
+        # TODO: Enable normalization
+        # qpos = (qpos - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
+        #action = (action - self.norm_stats["action_mean"]) / self.norm_stats[
+        #    "action_std"
+        #]
 
-        return image_data, qpos, target_pose, action, is_pad
+        return image_data, qpos, actions, is_pad
 
     @classmethod
     def get_norm_stats(self, dataset, training_iterations, ckpt_dir):
@@ -73,21 +71,18 @@ class ACTDataset:
             with open(stats_path, "rb") as f:
                 return pickle.load(f)
 
-        all_gripper_pose = []
-        all_target_pose = []
+        all_qpos = []
         all_actions = []
         norm_stats = {}
         data_iter = iter(dataset)
         print("Training iterations", training_iterations)
         for i in range(training_iterations):
             raw_batch = next(data_iter)
-            all_gripper_pose.append(torch.tensor(raw_batch["gripper_pose"].squeeze(1)))
-            all_target_pose.append(torch.tensor(raw_batch["target_pose"].squeeze(1)))
-            all_actions.append(torch.tensor(raw_batch["target_actions"].squeeze(1)))
+            all_qpos.append(torch.tensor(raw_batch["qpos"].squeeze(1)))
+            all_actions.append(torch.tensor(raw_batch["actions"].squeeze(1)))
 
         # normalize action data
-        all_gripper_pose = torch.stack(all_gripper_pose)
-        all_target_pose = torch.stack(all_target_pose)
+        all_qpos = torch.stack(all_qpos)
         all_actions = torch.stack(all_actions)
         action_mean = all_actions.mean(dim=[0, 1], keepdim=True).squeeze()
         norm_stats["action_mean"] = action_mean
@@ -95,20 +90,12 @@ class ACTDataset:
         action_std = torch.clip(action_std, 1e-2, np.inf)  # clipping
         norm_stats["action_std"] = action_std
 
-        # normalize gripper_pose data
-        qpos_mean = all_gripper_pose.mean(dim=[0, 1], keepdim=True).squeeze()
+        # normalize qpos data
+        qpos_mean = all_qpos.mean(dim=[0, 1], keepdim=True).squeeze()
         norm_stats["qpos_mean"] = qpos_mean
-        qpos_std = all_gripper_pose.std(dim=[0, 1], keepdim=True).squeeze()
+        qpos_std = all_qpos.std(dim=[0, 1], keepdim=True).squeeze()
         qpos_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
         norm_stats["qpos_std"] = qpos_std
-
-        # normalize target_pose data
-        target_pose_mean = all_target_pose.mean(dim=[0, 1], keepdim=True).squeeze()
-        norm_stats["target_pose_mean"] = target_pose_mean
-        target_pose_std = all_target_pose.std(dim=[0, 1], keepdim=True).squeeze()
-        target_pose_std = torch.clip(qpos_std, 1e-2, np.inf)  # clipping
-        norm_stats["target_pose_std"] = target_pose_std
-        print("target pose mean:", target_pose_mean)
 
         # save dataset stats
         if not os.path.isdir(ckpt_dir):

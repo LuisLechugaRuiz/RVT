@@ -24,7 +24,7 @@ def main():
     device = "cuda:0"
     tasks = ["close_jar"]  # Just testing from now.
     VAL_ITERATIONS = 100
-    TRAINING_ITERATIONS = 2000 # Previously: int(10000 // (BATCH_SIZE_TRAIN / 16))
+    TRAINING_ITERATIONS = 20000 # Previously: int(10000 // (BATCH_SIZE_TRAIN / 16))
     CKPT_DIR = DATA_FOLDER + "/act_checkpoint"
 
     train_dataset = ACTDataset(
@@ -123,6 +123,9 @@ def train_bc(
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
+
+    if not os.path.exists(ckpt_dir):
+        os.makedirs(ckpt_dir)
     for epoch in tqdm(range(num_epochs)):
         print(f"\nEpoch {epoch}")
         # validation
@@ -196,15 +199,14 @@ def train_bc(
 
 
 def forward_pass(data, policy):
-    image_data, qpos_data, target_pose_data, action_data, is_pad = data
-    image_data, qpos_data, target_pose_data, action_data, is_pad = (
+    image_data, qpos_data, actions_data, is_pad = data
+    image_data, qpos_data, actions_data, is_pad = (
         image_data.cuda(),
         qpos_data.cuda(),
-        target_pose_data.cuda(),
-        action_data.cuda(),
+        actions_data.cuda(),
         is_pad.cuda(),
     )
-    return policy(qpos_data, image_data, target_pose_data, action_data, is_pad)
+    return policy(qpos_data, image_data, actions_data, is_pad)
 
 
 def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):

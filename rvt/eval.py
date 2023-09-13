@@ -54,9 +54,9 @@ from rvt.utils.rvt_utils import load_agent as load_agent_state
 
 # ACT:
 from act.act_policy import ACTPolicy
-from rvt.tmp_action_act import EndEffectorPoseViaACT
 from rvt.tmp_run_act import ACTExecutor
 from rvt.tmp_full_action_act import MoveArmThenGripperACT
+from rlbench.action_modes.arm_action_modes import JointPosition
 
 def load_agent(
     model_path=None,
@@ -207,7 +207,7 @@ def eval(
 
     # ACT:
     # fixed parameters # TODO: Get this info from Config, remove script vars.
-    state_dim = 7
+    state_dim = 7 #  6 DOF + Grip
     num_queries = 20
     lr = 1e-4
     lr_backbone = 1e-5
@@ -233,24 +233,24 @@ def eval(
         "nheads": nheads,
         "camera_names": CAMERAS,
     }
-
     # load policy and stats
     ckpt_dir = DATA_FOLDER + "/act_checkpoint"
     ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
     print(policy_config)
     policy = ACTPolicy(policy_config)
-    stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
-    if os.path.exists(stats_path):
-        with open(stats_path, "rb") as f:
-            norm_stats = pickle.load(f)
+    # stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
+    # if os.path.exists(stats_path):
+        # with open(stats_path, "rb") as f:
+            # norm_stats = pickle.load(f) TODO: ENABLE when normalization
     loading_status = policy.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
     policy.cuda()
     policy.eval()
-    act_executor = ACTExecutor(policy, norm_stats, state_dim, num_queries)
-    arm_action_mode = EndEffectorPoseViaACT()
+    # act_executor = ACTExecutor(policy, norm_stats, state_dim, num_queries) TODO: ENABLE when normalization
+    act_executor = ACTExecutor(policy, state_dim, num_queries)
+    # arm_action_mode = EndEffectorPoseViaACT()
     gripper_mode = Discrete()
-    # arm_action_mode = EndEffectorPoseViaPlanning()
+    arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)
     action_mode = MoveArmThenGripperACT(arm_action_mode, gripper_mode, act_executor)
 

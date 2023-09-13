@@ -165,8 +165,7 @@ def create_act_replay(
     cameras: list,
     replay_size=3e5,
 ):
-
-    gripper_pose_size = 7
+    qpos_size = 7
     observation_elements = []
 
     # rgb, intrinsics, extrinsics
@@ -176,6 +175,17 @@ def create_act_replay(
                 "%s_rgb" % cname,
                 (
                     3,
+                    IMAGE_SIZE,
+                    IMAGE_SIZE,
+                ),
+                np.float32,
+            )
+        )
+        observation_elements.append(
+            ObservationElement(
+                "%s_rgba" % cname,
+                (
+                    4,
                     IMAGE_SIZE,
                     IMAGE_SIZE,
                 ),
@@ -206,20 +216,18 @@ def create_act_replay(
     # gripper_pose, target_pose and target_actions.
     observation_elements.extend(
         [
-            ReplayElement("gripper_pose", (gripper_pose_size,), np.float32),
-            ReplayElement("target_pose", (gripper_pose_size,), np.float32),
-            ReplayElement("target_actions", (20, gripper_pose_size), np.float32),
+            ReplayElement("qpos", (qpos_size,), np.float32),
+            ReplayElement("actions", (20, qpos_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
         ]
     )
-
     replay_buffer = (
         UniformReplayBuffer(  # all tuples in the buffer have equal sample weighting
             disk_saving=disk_saving,
             batch_size=batch_size,
             timesteps=timesteps,
             replay_capacity=int(replay_size),
-            action_shape=(20, gripper_pose_size), # Same as target_actions
+            action_shape=(20, qpos_size), # Same as target_actions
             action_dtype=np.float32,
             reward_shape=(),
             reward_dtype=np.float32,
@@ -585,10 +593,11 @@ def _add_gripper_poses(
         if i == episode_keypoints[k]:
             if k < len(episode_keypoints) - 1:
                 k += 1
-        obs_dict = extract_camera_data(obs, CAMERAS)
+
+        obs_dict = extract_camera_data(obs, CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3])
         # Fill actions_chunk
         last_index = min(i + action_chunk_size, len(demo))
-        target_actions = [to_action(i) for i in demo[i:last_index]]
+        target_actions = [i.joint_positions for i in demo[i:last_index]]
         is_pad = [False] * len(target_actions)
         # Ensure target_actions size is action_chunk_size
         difference = action_chunk_size - len(target_actions)
@@ -597,9 +606,8 @@ def _add_gripper_poses(
         is_pad += [True] * difference
 
         final_obs = {
-            "gripper_pose": to_action(obs),
-            "target_pose": to_action(demo[episode_keypoints[k]]),
-            "target_actions": target_actions,
+            "qpos": obs.joint_positions,
+            "actions": target_actions,
             "is_pad": is_pad
         }
         obs_dict.update(final_obs)
@@ -617,28 +625,67 @@ def _add_gripper_poses(
             **obs_dict
         )
     # Handling the final observation:
-    obs_dict = extract_camera_data(demo[-1], CAMERAS)
+    obs_dict = extract_camera_data(demo[-1], CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3])
     final_obs = {
-        "gripper_pose": to_action(demo[-1]),
-        "target_pose": to_action(demo[episode_keypoints[-1]]),
-        "target_actions": [to_action(demo[-1])] * action_chunk_size,
+        "qpos": demo[-1].joint_positions,
+        "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1)
     }
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
 
 
-def to_action(sample):
-    quat = utils.normalize_quaternion(sample.gripper_pose[3:])
-    if quat[-1] < 0:
-        quat = -quat
-    euler_rot = aug_utils.quaternion_to_euler_rad(quat)
-    return np.concatenate([sample.gripper_pose[:3], euler_rot, np.array([int(sample.gripper_open)])])
+def add_keypoint_channel(keypoint, obs_dict):
+    for name in CAMERAS:
+        height, width = obs_dict['%s_rgb' % name].shape[1:3]
+        pixels = _point_to_pixel_index(
+            keypoint,
+            obs_dict['%s_camera_extrinsics' % name],
+            obs_dict['%s_camera_intrinsics' % name],
+            width,
+            height)
+
+        if pixels:
+            px, py = pixels
+        keypoint_channel = np.zeros_like(obs_dict['%s_rgb' % name][0])
+        keypoint_channel[int(py), int(px)] = 1.0
+        rgba_image = np.concatenate([obs_dict['%s_rgb' % name], keypoint_channel[np.newaxis, :, :]], axis=0)
+
+        obs_dict['%s_rgba' % name] = rgba_image
+
+    return obs_dict
+
+
+def _point_to_pixel_index(
+        point: np.ndarray,
+        extrinsics: np.ndarray,
+        intrinsics: np.ndarray,
+        image_width: int,
+        image_height: int):
+
+    point = np.array([point[0], point[1], point[2], 1])
+    world_to_cam = np.linalg.inv(extrinsics)
+    point_in_cam_frame = world_to_cam.dot(point)
+    px, py, pz = point_in_cam_frame[:3]
+
+    # Check if the point is behind the camera
+    if pz <= 0:
+        return None
+
+    px = 2 * intrinsics[0, 2] - int(-intrinsics[0, 0] * (px / pz) + intrinsics[0, 2])
+    py = 2 * intrinsics[1, 2] - int(-intrinsics[1, 1] * (py / pz) + intrinsics[1, 2])
+
+    # Clip px and py to the image bounds
+    px = np.clip(px, 0, image_width-1)
+    py = np.clip(py, 0, image_height-1)
+
+    return px, py
 
 
 def extract_camera_data(
     obs: Observation,
-    cameras
+    cameras,
+    keypoint
 ):
     obs_dict = vars(obs)
     obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
@@ -650,4 +697,5 @@ def extract_camera_data(
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
+    camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict)
     return camera_obs_dict

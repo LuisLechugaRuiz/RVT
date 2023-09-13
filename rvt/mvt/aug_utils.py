@@ -84,12 +84,6 @@ def quaternion_to_euler(quaternion, gimble_fix=True):
     return euler
 
 
-def quaternion_to_euler_rad(quaternion):
-    # Convert to Euler in radians
-    euler = Rotation.from_quat(quaternion).as_euler('xyz')
-    return euler
-
-
 def discrete_euler_to_quaternion(discrete_euler, resolution):
     euluer = (discrete_euler * resolution) - 180
     return Rotation.from_euler("xyz", euluer, degrees=True).as_quat()

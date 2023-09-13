@@ -3,9 +3,10 @@ import numpy as np
 
 
 class ACTExecutor:
-    def __init__(self, policy, norm_stats, state_dim, num_queries):
+    # def __init__(self, policy, norm_stats, state_dim, num_queries): -> TODO: Enable when norm
+    def __init__(self, policy, state_dim, num_queries):
         self.policy = policy
-        self.norm_stats = norm_stats
+        # self.norm_stats = norm_stats -> TODO: Enable when norm
         self.prev_actions = torch.zeros([num_queries, state_dim]).cuda()
         self.num_queries = num_queries
         self.exp_weights = self.calculate_exp_weights()
@@ -42,15 +43,17 @@ class ACTExecutor:
 
         return raw_action
 
-    def step(self, qpos, image, target_pose):
+    def step(self, qpos, image):
         qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
-        target_pose = torch.from_numpy(target_pose).float().cuda().unsqueeze(0)
         image = image.cuda().unsqueeze(0)
-        qpos = self._pre_process(qpos)
-        all_actions = self.policy(qpos, image, target_pose)
-        raw_action = self._temporal_ensembling(all_actions)
+        # qpos = self._pre_process(qpos) TODO: Enable normalization
+        all_actions = self.policy(qpos, image)
+        # TODO: Enable after verification
+        # raw_action = self._temporal_ensembling(all_actions)
+        raw_action = all_actions # TODO: Remove
         raw_action = raw_action.squeeze(0).cuda()
-        action = self._post_process(raw_action)
+        # action = self._post_process(raw_action) TODO: Enable normalization
+        action = raw_action
         return action
 
     def iterate(self):
