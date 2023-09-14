@@ -6,10 +6,13 @@
 	url = https://github.com/MohitShridhar/RLBench.git
 [submodule "libs/YARR"]
 	path = rvt/libs/YARR
-        url = https://github.com/NVlabs/YARR.git
+	url = https://github.com/LuisLechugaRuiz/YARR.git
+	branch = luis/fix_numpy
 [submodule "libs/peract"]
 	path = rvt/libs/peract
-        url = https://github.com/NVlabs/peract.git
+	url = https://github.com/LuisLechugaRuiz/peract.git
+	branch = luis/fix_numpy_bool
 [submodule "libs/peract_colab/peract_colab"]
-        path = rvt/libs/peract_colab/peract_colab
-        url = https://github.com/peract/peract_colab.git
+	path = rvt/libs/peract_colab/peract_colab
+	url = https://github.com/LuisLechugaRuiz/peract_colab.git
+	branch = luis/update_numpy_bool
