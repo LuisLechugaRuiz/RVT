@@ -707,7 +707,6 @@ class RVTAgent:
                 .float()
                 .to(self._device)
             )
-
         proprio = arm_utils.stack_on_channel(observation["low_dim_state"])
 
         obs, pcd = peract_utils._preprocess_inputs(observation, self.cameras)

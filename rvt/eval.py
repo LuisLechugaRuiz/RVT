@@ -248,7 +248,6 @@ def eval(
     policy.eval()
     # act_executor = ACTExecutor(policy, norm_stats, state_dim, num_queries) TODO: ENABLE when normalization
     act_executor = ACTExecutor(policy, state_dim, num_queries)
-    # arm_action_mode = EndEffectorPoseViaACT()
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)

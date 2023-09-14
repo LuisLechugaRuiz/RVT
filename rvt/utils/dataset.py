@@ -11,11 +11,10 @@ import torch
 import pickle
 import logging
 import numpy as np
-from typing import List
+from typing import List, Tuple
 
 import clip
 import peract_colab.arm.utils as utils
-import rvt.mvt.aug_utils as aug_utils
 
 from peract_colab.rlbench.utils import get_stored_demo
 from yarr.utils.observation_type import ObservationElement
@@ -27,6 +26,12 @@ from rlbench.demo import Demo
 from rvt.utils.peract_utils import LOW_DIM_SIZE, IMAGE_SIZE, CAMERAS
 from rvt.libs.peract.helpers.demo_loading_utils import keypoint_discovery
 from rvt.libs.peract.helpers.utils import extract_obs
+
+# DEBUG
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import cv2
+import re
 
 
 def create_replay(
@@ -550,14 +555,19 @@ def fill_act_replay(
 
             # extract keypoints
             episode_keypoints = keypoint_discovery(demo)
+            demo, episode_keypoints = clean_samples(demo, episode_keypoints)
+            demo_images_path = f"data/demo_images/{d_idx}"
             _add_gripper_poses(
                 replay,
                 task,
                 task_replay_storage_folder,
                 demo,
                 episode_keypoints,
-                action_chunk_size
+                action_chunk_size,
+                demo_images_path  # TODO: Remove, only for debugging.
             )
+            # demo_video_path = f"data/demo_video/{d_idx}"
+            # create_video_from_images(demo_images_path, demo_video_path)
 
         # save TERMINAL info in replay_info.npy
         task_idx = replay._task_index[task]
@@ -577,7 +587,6 @@ def fill_act_replay(
         print("Replay filled with demos.")
 
 
-# add gripper poses to replay
 def _add_gripper_poses(
     replay: ReplayBuffer,
     task: str,
@@ -585,18 +594,18 @@ def _add_gripper_poses(
     demo: Demo,
     episode_keypoints: List[int],
     action_chunk_size: int,
+    demo_images_path: str
 ):
     k = 0
-    for i in range(len(demo) - 1):  # Excluding the last observation
+    for i in range(len(demo) - 1):
         obs = demo[i]
-        # Update the keypoint when we cross the next_keypoint_idx
         if i == episode_keypoints[k]:
             if k < len(episode_keypoints) - 1:
                 k += 1
 
-        obs_dict = extract_camera_data(obs, CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3])
+        obs_dict = extract_camera_data(obs, CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3], demo_images_path)
         # Fill actions_chunk
-        last_index = min(i + action_chunk_size, len(demo))
+        last_index = min(i + action_chunk_size, episode_keypoints[k])
         target_actions = [i.joint_positions for i in demo[i:last_index]]
         is_pad = [False] * len(target_actions)
         # Ensure target_actions size is action_chunk_size
@@ -625,7 +634,7 @@ def _add_gripper_poses(
             **obs_dict
         )
     # Handling the final observation:
-    obs_dict = extract_camera_data(demo[-1], CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3])
+    obs_dict = extract_camera_data(demo[-1], CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3], demo_images_path)
     final_obs = {
         "qpos": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
@@ -635,7 +644,37 @@ def _add_gripper_poses(
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
 
 
-def add_keypoint_channel(keypoint, obs_dict):
+def clean_samples(demo: Demo, keypoints: List[int], joint_diff_threshold: float = 0.02) -> Tuple[Demo, List[int]]:
+    prev_joint_position = np.zeros(7,)
+    indices_to_remove = []
+    proximity_threshold = 10  # Minimum distance to a keypoint to not be removed
+
+    # print(f"Last keypoint before adjustment: {demo[keypoints[-1]].joint_positions}")
+    # print(f"Before Adjusting Keypoints: {keypoints}, demo length: {len(demo._observations)}")
+    for i, sample in enumerate(demo._observations):
+        diff = sample.joint_positions - prev_joint_position
+        is_close_to_keypoint = any(abs(k - i) < proximity_threshold for k in keypoints)
+
+        if np.all(np.abs(diff) < joint_diff_threshold) and i not in keypoints and not is_close_to_keypoint:
+            indices_to_remove.append(i)
+        else:
+            prev_joint_position = sample.joint_positions
+
+    indices_to_remove.sort(reverse=True)
+
+    for idx in indices_to_remove:
+        # Adjust the keypoints that come after this index.
+        keypoints = [k - 1 if k > idx else k for k in keypoints]
+
+        # Remove the observation at this index.
+        del demo._observations[idx]
+    # print(f"Last keypoint after adjustment: {demo[keypoints[-1]].joint_positions}")
+    # print(f"After Adjusting Keypoints: {keypoints}, demo length: {len(demo._observations)}")
+
+    return demo, keypoints
+
+
+def add_keypoint_channel(keypoint, obs_dict, demo_images_path):
     for name in CAMERAS:
         height, width = obs_dict['%s_rgb' % name].shape[1:3]
         pixels = _point_to_pixel_index(
@@ -650,9 +689,9 @@ def add_keypoint_channel(keypoint, obs_dict):
         keypoint_channel = np.zeros_like(obs_dict['%s_rgb' % name][0])
         keypoint_channel[int(py), int(px)] = 1.0
         rgba_image = np.concatenate([obs_dict['%s_rgb' % name], keypoint_channel[np.newaxis, :, :]], axis=0)
-
+        # if name == 'front':
+            # draw_circle_on_image(obs_dict['%s_rgb' % name], px, py, demo_images_path)  # ONLY FOR DEBUGGING
         obs_dict['%s_rgba' % name] = rgba_image
-
     return obs_dict
 
 
@@ -685,7 +724,8 @@ def _point_to_pixel_index(
 def extract_camera_data(
     obs: Observation,
     cameras,
-    keypoint
+    keypoint,
+    demo_images_path  # TODO: Remove only for debugging
 ):
     obs_dict = vars(obs)
     obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
@@ -697,5 +737,88 @@ def extract_camera_data(
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
-    camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict)
+    camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict, demo_images_path)
     return camera_obs_dict
+
+
+# DEBUG FUNCTIONS:
+def get_next_image_path(directory):
+    # Get a list of all files in the directory
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    files = os.listdir(directory)
+
+    # Filter files by pattern 'imageXX.png'
+    image_files = [f for f in files if re.match(r'image(\d+).png', f)]
+
+    if not image_files:  # No files matching the pattern
+        return os.path.join(directory, 'image1.png')
+
+    # Extract image numbers and find the last (max) number
+    numbers = [int(re.search(r'(\d+)', f).group(1)) for f in image_files]
+    next_number = max(numbers) + 1
+
+    return os.path.join(directory, f'image{next_number}.png')
+
+
+def draw_circle_on_image(image_np, px, py, demo_images_path):
+    # If image data is uint8 [0, 255], convert to float [0, 1] for display
+    if image_np.dtype == np.uint8:
+        image_np = image_np.astype(float) / 255
+
+    # Create a figure and axis
+    fig, ax = plt.subplots()
+
+    # Display the image
+    image_np = image_np.transpose(1, 2, 0)
+    ax.imshow(image_np)
+
+    # Define the radius for the circle
+    radius = 5
+
+    # Create a circle with the specified center and radius
+    circle = patches.Circle((px, py), radius, color='red', fill=False)
+
+    # Add the circle to the axis
+    ax.add_patch(circle)
+
+    # Remove axis
+    ax.axis('off')
+
+    # Save the image without displaying it
+    save_path = get_next_image_path(demo_images_path)
+    plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+    plt.close(fig)  # Close the figure
+
+
+def create_video_from_images(image_folder, output_video_path, fps=30, img_format=".png"):
+    if not os.path.exists(output_video_path):
+        os.makedirs(output_video_path)
+
+    def image_sort_key(filename):
+        match = re.search(r'(\d+)', filename)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    images = sorted(os.listdir(image_folder), key=image_sort_key)
+    images = [img for img in images if img.endswith(img_format)]
+
+    # Check if we have any images to process
+    if not images:
+        raise ValueError("No images found in the specified directory!")
+
+    # Find out the frame size from the first image
+    frame = cv2.imread(os.path.join(image_folder, images[0]))
+    h, w, layers = frame.shape
+    size = (w, h)
+
+    # Define the codec and create VideoWriter object
+    out = cv2.VideoWriter(f"{output_video_path}/video.avi", cv2.VideoWriter_fourcc(*'DIVX'), fps, size)
+
+    for image in images:
+        img_path = os.path.join(image_folder, image)
+        frame = cv2.imread(img_path)
+        out.write(frame)
+
+    out.release()

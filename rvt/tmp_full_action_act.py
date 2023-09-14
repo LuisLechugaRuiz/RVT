@@ -16,40 +16,75 @@ class MoveArmThenGripperACT(ActionMode):
         super(MoveArmThenGripperACT, self).__init__(arm_action_mode, gripper_mode)
         self.act_executor = act_executor
         self.key_points = {}
-        self.threshold = 0.1
-        self.images = 0
-        # self.threshold = 0.05
+        self.last_action = np.zeros(9,)
+        self.threshold = 0.02
+        self.images = 0  # TODO: Remove when we draw_circle_on_image.
+        self.keypoints = 0 # TODO: Remove later!
+        self.step_iterations = 20
 
     def action(self, scene: Scene, action: np.ndarray):
         target_reached = False
-        print("NEW KEYPOINT:", action[:3])
-        self.fill_key_point(action[:3], scene.get_observation())
-        try:
-            while not target_reached:
+
+        # DEBUG
+        obs = scene.get_observation()
+        obs_dict = self.get_obs_dict(obs)
+        gripper_pose = obs_dict["gripper_pose"]
+        print(f"IT: {self.keypoints}, CURRENT POSE: {gripper_pose}, NEW KEYPOINT: {action}")
+        print("DEBUG - Gripper open", obs_dict["gripper_open"])
+        self.keypoints += 1
+
+        # Only fill key point if action is not equal to last, this is due to the stuck condition, remove it after.
+        if self.euclidean_distance(self.last_action[:7], action[:7]) > 0.1:
+            self.fill_key_point(action[:3], scene.get_observation())
+        first_action = True  # TODO :REMOVE
+        stuck_iterations = 0
+        actions = 0
+        prev_qpos = np.zeros(7,)
+        while not target_reached:
+            if actions % self.step_iterations == 0:
                 obs = scene.get_observation()
                 obs_dict = self.get_obs_dict(obs)
                 image_data = self.get_image(obs)
                 qpos = obs_dict["joint_positions"]
+                # print("QPOS:", qpos)
                 action_chunk = self.act_executor.step(
                     qpos, image_data
-                )
-                # print("QPOS:", qpos)
-                pred_action = action_chunk[10].cpu().numpy() # TODO: Don't take last, is just a trick to avoid looping due to small step.
-                # print("PRED ACTION:", pred_action)
-                self.arm_action_mode.action(scene, pred_action)
-                self.act_executor.iterate()  # Increase iteration to roll out executed poses. TODO: Remove and do it every step.
-                # print("Euclidean distance is:", self.euclidean_distance(obs_dict["gripper_pose"], action[:7]))
-                # print("Current gripper pose:", obs_dict["gripper_pose"])
-                # print("Target action:", action[:7])
-                if (
-                    self.euclidean_distance(obs_dict["gripper_pose"][:3], action[:3])
-                    < self.threshold
-                ):
-                    target_reached = True
-            ee_action = np.atleast_1d(action[7])
-            self.gripper_action_mode.action(scene, ee_action)
-        except Exception as e:
-            print(f"Exception caught: {e}")
+                ).cpu().numpy()
+            # print("PRED ACTION:", pred_action[0])
+            # TODO: REMOVE
+            pred_action = action_chunk[0]
+            action_chunk = action_chunk[1:]
+            if first_action:
+                print("Current position:", qpos)
+                print("First action:", pred_action)
+                print("NEXT ACTIONS:", action_chunk)
+                first_action = False
+            self.arm_action_mode.action(scene, pred_action)
+            self.act_executor.iterate()  # Increase iteration to roll out executed poses. TODO: Should we remove this and call the model every step?
+            # print("Euclidean distance is:", self.euclidean_distance(obs_dict["gripper_pose"], action[:7]))
+            # print("Current gripper pose:", obs_dict["gripper_pose"])
+            # print("Target action:", action[:7])
+            if (
+                self.euclidean_distance(obs_dict["gripper_pose"][:3], action[:3])
+                < self.threshold
+            ):
+                print("TARGET REACHED!, last action was:", pred_action)
+                gripper_pose = obs_dict["gripper_pose"]
+                diff = self.euclidean_distance(obs_dict["gripper_pose"][:3], action[:3])
+                print(f"IT: {self.keypoints}, CURRENT POSE: {gripper_pose}, KEYPOINT: {action}, DIFF: {diff}")
+                target_reached = True
+            if (self.euclidean_distance(qpos, prev_qpos)) < 0.02:
+                stuck_iterations += 1
+                if stuck_iterations > 20:
+                    print("IS STUCK!!")
+                    target_reached = True  # Leave the loop, retrieve new action point or fail after timeout.
+            else:
+                stuck_iterations = 0
+            actions += 1
+            prev_qpos = qpos
+        # ee_action = np.atleast_1d(action[7]) TODO: Check if remove.
+        # self.gripper_action_mode.action(scene, ee_action)
+        self.last_action = action
 
     def euclidean_distance(self, pos1, pos2):
         return np.linalg.norm(np.array(pos1) - np.array(pos2))
@@ -127,9 +162,7 @@ class MoveArmThenGripperACT(ActionMode):
 
         return px, py
 
-    def action_shape(self, scene: Scene):
-        return (9,)
-
+    # TODO: Remove, only for debugging.
     def draw_circle_on_image(self, image_np, px, py, save_path):
         # If image data is uint8 [0, 255], convert to float [0, 1] for display
         if image_np.dtype == np.uint8:
@@ -156,3 +189,6 @@ class MoveArmThenGripperACT(ActionMode):
         # Save the image without displaying it
         plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
         plt.close(fig)  # Close the figure
+
+    def action_shape(self, scene: Scene):
+        return (9,)
