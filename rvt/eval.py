@@ -54,8 +54,8 @@ from rvt.utils.rvt_utils import load_agent as load_agent_state
 
 # ACT:
 from act.act_policy import ACTPolicy
-from rvt.tmp_run_act import ACTExecutor
-from rvt.tmp_full_action_act import MoveArmThenGripperACT
+from general_manipulation.act_executor import ACTExecutor
+from general_manipulation.act_action_mode import ACTActionMode
 from rlbench.action_modes.arm_action_modes import JointPosition
 
 def load_agent(
@@ -207,7 +207,7 @@ def eval(
 
     # ACT:
     # fixed parameters # TODO: Get this info from Config, remove script vars.
-    state_dim = 7 #  6 DOF + Grip
+    state_dim = 7
     num_queries = 20
     lr = 1e-4
     lr_backbone = 1e-5
@@ -251,8 +251,7 @@ def eval(
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)
-    action_mode = MoveArmThenGripperACT(arm_action_mode, gripper_mode, act_executor)
-
+    action_mode = ACTActionMode(arm_action_mode, gripper_mode, act_executor)
     task_files = [
         t.replace(".py", "")
         for t in os.listdir(rlbench_task.TASKS_PATH)
@@ -282,7 +281,6 @@ def eval(
         time_in_state=True,
         record_every_n=1 if save_video else -1,
     )
-
     eval_env.eval = True
 
     device = f"cuda:{device}"
@@ -347,7 +345,6 @@ def eval(
                 print(
                     f"Evaluating {task_name} | Episode {ep} | Score: {reward} | Episode Length: {len(episode_rollout)} | Lang Goal: {lang_goal}"
                 )
-
         # report summaries
         summaries = []
         summaries.extend(stats_accumulator.pop())
