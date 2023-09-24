@@ -186,17 +186,17 @@ def create_act_replay(
                 np.float32,
             )
         )
-        observation_elements.append(
-            ObservationElement(
-                "%s_rgba" % cname,
-                (
-                    4,
-                    IMAGE_SIZE,
-                    IMAGE_SIZE,
-                ),
-                np.float32,
-            )
-        )
+        # observation_elements.append(
+        #    ObservationElement(
+        #        "%s_rgba" % cname,
+        #        (
+        #            4,
+        #            IMAGE_SIZE,
+        #            IMAGE_SIZE,
+        #        ),
+        #        np.float32,
+        #    )
+        #)
         observation_elements.append(
             ObservationElement(
                 "%s_camera_extrinsics" % cname,
@@ -557,7 +557,7 @@ def fill_act_replay(
             episode_keypoints = keypoint_discovery(demo)
             demo, episode_keypoints = clean_samples(demo, episode_keypoints)
             demo_images_path = f"data/demo_images/{d_idx}"
-            _add_gripper_poses(
+            _add_joint_positions(
                 replay,
                 task,
                 task_replay_storage_folder,
@@ -587,7 +587,7 @@ def fill_act_replay(
         print("Replay filled with demos.")
 
 
-def _add_gripper_poses(
+def _add_joint_positions(
     replay: ReplayBuffer,
     task: str,
     task_replay_storage_folder: str,
@@ -605,12 +605,19 @@ def _add_gripper_poses(
 
         obs_dict = extract_camera_data(obs, CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3], demo_images_path)
         # Fill actions_chunk
-        last_index = min(i + action_chunk_size, episode_keypoints[k])
-        target_actions = [i.joint_positions for i in demo[i:last_index]]
+        # last_index = min(i + action_chunk_size, episode_keypoints[k]) -> TODO: Enable when using keypoint as act input.
+        last_index = min(i + 1 + action_chunk_size, len(demo) - 1)
+        if i < len(demo) - 1:
+            target_actions = [i.joint_positions for i in demo[i+1:last_index]]
+        else:
+            target_actions = []
         is_pad = [False] * len(target_actions)
         # Ensure target_actions size is action_chunk_size
         difference = action_chunk_size - len(target_actions)
-        target_actions += [target_actions[-1]] * difference
+        if len(target_actions) > 0:
+            target_actions += [target_actions[-1]] * difference
+        else:
+            target_actions = [demo[i].joint_positions] * difference
         # Padding to true as we are filling with duplicated data.
         is_pad += [True] * difference
 
@@ -737,7 +744,7 @@ def extract_camera_data(
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
-    camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict, demo_images_path)
+    # camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict, demo_images_path)
     return camera_obs_dict
 
 

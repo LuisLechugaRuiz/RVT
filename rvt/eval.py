@@ -215,8 +215,8 @@ def eval(
     enc_layers = 4
     dec_layers = 7
     nheads = 8
-    dim_feedforward = 2048
-    hidden_dim = 256
+    dim_feedforward = 3200
+    hidden_dim = 512
     kl_weight = 10
     num_queries = 20
 
@@ -238,16 +238,16 @@ def eval(
     ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
     print(policy_config)
     policy = ACTPolicy(policy_config)
-    # stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
-    # if os.path.exists(stats_path):
-        # with open(stats_path, "rb") as f:
-            # norm_stats = pickle.load(f) TODO: ENABLE when normalization
+    stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
+    if os.path.exists(stats_path):
+        with open(stats_path, "rb") as f:
+            norm_stats = pickle.load(f)
+            print("DEBUG NORM_STATS:", norm_stats)
     loading_status = policy.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
     policy.cuda()
     policy.eval()
-    # act_executor = ACTExecutor(policy, norm_stats, state_dim, num_queries) TODO: ENABLE when normalization
-    act_executor = ACTExecutor(policy, state_dim, num_queries)
+    act_executor = ACTExecutor(policy, norm_stats, state_dim, num_queries)
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)
