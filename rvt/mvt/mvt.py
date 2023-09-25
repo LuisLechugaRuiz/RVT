@@ -7,11 +7,11 @@ import torch
 
 from torch import nn
 
-import rvt.mvt.utils as mvt_utils
-
 from rvt.mvt.mvt_single import MVT as MVTSingle
 from rvt.mvt.config import get_cfg_defaults
 from rvt.mvt.renderer import BoxRenderer
+
+from general_manipulation.models.act_model import ACTModel
 
 
 class MVT(nn.Module):
@@ -42,6 +42,7 @@ class MVT(nn.Module):
         add_depth,
         pe_fix,
         renderer_device="cuda:0",
+        act_cfg_dict=None,
     ):
         """MultiView Transfomer"""
         super().__init__()
@@ -73,6 +74,7 @@ class MVT(nn.Module):
         self.img_size = img_size
 
         self.mvt1 = MVTSingle(**args, renderer=self.renderer)
+        self.act_model = ACTModel(act_cfg_dict, num_img=self.num_img)
 
     def get_pt_loc_on_img(self, pt, dyn_cam_info, out=None):
         """
@@ -216,15 +218,20 @@ class MVT(nn.Module):
         proprio=None,
         lang_emb=None,
         img_aug=0,
-        **kwargs,
+        propio_joint_abs=None,
+        actions=None,
+        is_pad=None
     ):
         """
         :param pc: list of tensors, each tensor of shape (num_points, 3)
         :param img_feat: list tensors, each tensor of shape
             (bs, num_points, img_feat_dim)
-        :param proprio: tensor of shape (bs, priprio_dim)
+        :param proprio: tensor of shape (bs, proprio_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         :param img_aug: (float) magnitude of augmentation in rgb image
+        :param propio_joint_abs: tensor of shape (bs, propio_joint_abs_dim)
+        :param actions: tensor of shape (batch, seq, action_dim)
+        :param is_pad: tensor of shape (batch, seq, 1)
         """
 
         self.verify_inp(pc, img_feat, proprio, lang_emb, img_aug)
@@ -234,8 +241,19 @@ class MVT(nn.Module):
             img_aug,
             dyn_cam_info=None,
         )
-        out = self.mvt1(img=img, proprio=proprio, lang_emb=lang_emb, **kwargs)
-        return out
+        mvt_out = self.mvt1(img=img, proprio=proprio, lang_emb=lang_emb)
+        img = self.add_hm(img, mvt_out["hm"])
+        act_out = self.act_model(img=img, propio=propio_joint_abs, actions=actions, is_pad=is_pad)
+        return mvt_out, act_out
+
+    def add_hm(self, img, hm):
+        bs = img.shape[0]
+
+        hm = hm.view(
+            bs, self.num_img, -1, -1, -1
+        )  # [bs * self.num_img, 1, h, w] -> [bs, self.num_img, 1, h, w]
+        img = torch.cat((img, hm))
+        return img
 
     def free_mem(self):
         """

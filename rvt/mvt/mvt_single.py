@@ -50,6 +50,7 @@ class MVT(nn.Module):
         pe_fix,
         renderer_device="cuda:0",
         renderer=None,
+        # act_cfg_dict
     ):
         """MultiView Transfomer
 
@@ -291,13 +292,11 @@ class MVT(nn.Module):
         img,
         proprio=None,
         lang_emb=None,
-        **kwargs,
     ):
         """
         :param img: tensor of shape (bs, num_img, img_feat_dim, h, w)
         :param proprio: tensor of shape (bs, priprio_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
-        :param img_aug: (float) magnitude of augmentation in rgb image
         """
 
         bs, num_img, img_feat_dim, h, w = img.shape
@@ -427,7 +426,7 @@ class MVT(nn.Module):
         feat = torch.cat(feat, dim=-1)
         feat = self.feat_fc(feat)
 
-        out = {"trans": trans, "feat": feat}
+        out = {"trans": trans, "feat": feat, "hm": hm}
 
         return out
 
