@@ -171,7 +171,13 @@ def create_act_replay(
     replay_size=3e5,
 ):
     qpos_size = 7
+    max_token_seq_len = 77
+    lang_emb_dim = 512
+
     observation_elements = []
+    observation_elements.append(
+        ObservationElement("low_dim_state", (LOW_DIM_SIZE,), np.float32)
+    )
 
     # rgb, intrinsics, extrinsics
     for cname in cameras:
@@ -224,6 +230,14 @@ def create_act_replay(
             ReplayElement("qpos", (qpos_size,), np.float32),
             ReplayElement("actions", (20, qpos_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
+            ReplayElement(
+                "lang_goal_embs",
+                (
+                    max_token_seq_len,
+                    lang_emb_dim,
+                ),  # extracted from CLIP's language encoder
+                np.float32,
+            ),
         ]
     )
     replay_buffer = (
@@ -527,6 +541,9 @@ def fill_act_replay(
     num_demos: int,
     data_path: str,
     action_chunk_size: str,
+    description: str = "",
+    device="cpu",
+    clip_model=None,
 ):
     print("Replay disk saving:", replay._disk_saving)
     print("Storage:", task_replay_storage_folder)
@@ -564,6 +581,9 @@ def fill_act_replay(
                 demo,
                 episode_keypoints,
                 action_chunk_size,
+                description,
+                device,
+                clip_model,
                 demo_images_path  # TODO: Remove, only for debugging.
             )
             # demo_video_path = f"data/demo_video/{d_idx}"
@@ -594,7 +614,9 @@ def _add_joint_positions(
     demo: Demo,
     episode_keypoints: List[int],
     action_chunk_size: int,
-    demo_images_path: str
+    description: str,
+    device: str,
+    clip_model=None
 ):
     k = 0
     for i in range(len(demo) - 1):
@@ -603,7 +625,14 @@ def _add_joint_positions(
             if k < len(episode_keypoints) - 1:
                 k += 1
 
-        obs_dict = extract_camera_data(obs, CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3], demo_images_path)
+        obs_dict = extract_camera_data(obs, CAMERAS)
+
+        tokens = clip.tokenize([description]).numpy()
+        token_tensor = torch.from_numpy(tokens).to(device)
+        with torch.no_grad():
+            lang_feats, lang_embs = _clip_encode_text(clip_model, token_tensor)
+        obs_dict["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
+
         # Fill actions_chunk
         # last_index = min(i + action_chunk_size, episode_keypoints[k]) -> TODO: Enable when using keypoint as act input.
         last_index = min(i + 1 + action_chunk_size, len(demo) - 1)
@@ -641,12 +670,13 @@ def _add_joint_positions(
             **obs_dict
         )
     # Handling the final observation:
-    obs_dict = extract_camera_data(demo[-1], CAMERAS, demo[episode_keypoints[k]].gripper_pose[:3], demo_images_path)
+    obs_dict = extract_camera_data(demo[-1], CAMERAS)
     final_obs = {
         "qpos": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1)
     }
+    final_obs["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
 
@@ -681,58 +711,9 @@ def clean_samples(demo: Demo, keypoints: List[int], joint_diff_threshold: float 
     return demo, keypoints
 
 
-def add_keypoint_channel(keypoint, obs_dict, demo_images_path):
-    for name in CAMERAS:
-        height, width = obs_dict['%s_rgb' % name].shape[1:3]
-        pixels = _point_to_pixel_index(
-            keypoint,
-            obs_dict['%s_camera_extrinsics' % name],
-            obs_dict['%s_camera_intrinsics' % name],
-            width,
-            height)
-
-        if pixels:
-            px, py = pixels
-        keypoint_channel = np.zeros_like(obs_dict['%s_rgb' % name][0])
-        keypoint_channel[int(py), int(px)] = 1.0
-        rgba_image = np.concatenate([obs_dict['%s_rgb' % name], keypoint_channel[np.newaxis, :, :]], axis=0)
-        # if name == 'front':
-            # draw_circle_on_image(obs_dict['%s_rgb' % name], px, py, demo_images_path)  # ONLY FOR DEBUGGING
-        obs_dict['%s_rgba' % name] = rgba_image
-    return obs_dict
-
-
-def _point_to_pixel_index(
-        point: np.ndarray,
-        extrinsics: np.ndarray,
-        intrinsics: np.ndarray,
-        image_width: int,
-        image_height: int):
-
-    point = np.array([point[0], point[1], point[2], 1])
-    world_to_cam = np.linalg.inv(extrinsics)
-    point_in_cam_frame = world_to_cam.dot(point)
-    px, py, pz = point_in_cam_frame[:3]
-
-    # Check if the point is behind the camera
-    if pz <= 0:
-        return None
-
-    px = 2 * intrinsics[0, 2] - int(-intrinsics[0, 0] * (px / pz) + intrinsics[0, 2])
-    py = 2 * intrinsics[1, 2] - int(-intrinsics[1, 1] * (py / pz) + intrinsics[1, 2])
-
-    # Clip px and py to the image bounds
-    px = np.clip(px, 0, image_width-1)
-    py = np.clip(py, 0, image_height-1)
-
-    return px, py
-
-
 def extract_camera_data(
     obs: Observation,
     cameras,
-    keypoint,
-    demo_images_path  # TODO: Remove only for debugging
 ):
     obs_dict = vars(obs)
     obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
@@ -744,88 +725,4 @@ def extract_camera_data(
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
-    # camera_obs_dict = add_keypoint_channel(keypoint, camera_obs_dict, demo_images_path)
     return camera_obs_dict
-
-
-# DEBUG FUNCTIONS:
-def get_next_image_path(directory):
-    # Get a list of all files in the directory
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    files = os.listdir(directory)
-
-    # Filter files by pattern 'imageXX.png'
-    image_files = [f for f in files if re.match(r'image(\d+).png', f)]
-
-    if not image_files:  # No files matching the pattern
-        return os.path.join(directory, 'image1.png')
-
-    # Extract image numbers and find the last (max) number
-    numbers = [int(re.search(r'(\d+)', f).group(1)) for f in image_files]
-    next_number = max(numbers) + 1
-
-    return os.path.join(directory, f'image{next_number}.png')
-
-
-def draw_circle_on_image(image_np, px, py, demo_images_path):
-    # If image data is uint8 [0, 255], convert to float [0, 1] for display
-    if image_np.dtype == np.uint8:
-        image_np = image_np.astype(float) / 255
-
-    # Create a figure and axis
-    fig, ax = plt.subplots()
-
-    # Display the image
-    image_np = image_np.transpose(1, 2, 0)
-    ax.imshow(image_np)
-
-    # Define the radius for the circle
-    radius = 5
-
-    # Create a circle with the specified center and radius
-    circle = patches.Circle((px, py), radius, color='red', fill=False)
-
-    # Add the circle to the axis
-    ax.add_patch(circle)
-
-    # Remove axis
-    ax.axis('off')
-
-    # Save the image without displaying it
-    save_path = get_next_image_path(demo_images_path)
-    plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
-    plt.close(fig)  # Close the figure
-
-
-def create_video_from_images(image_folder, output_video_path, fps=30, img_format=".png"):
-    if not os.path.exists(output_video_path):
-        os.makedirs(output_video_path)
-
-    def image_sort_key(filename):
-        match = re.search(r'(\d+)', filename)
-        if match:
-            return int(match.group(1))
-        return 0
-
-    images = sorted(os.listdir(image_folder), key=image_sort_key)
-    images = [img for img in images if img.endswith(img_format)]
-
-    # Check if we have any images to process
-    if not images:
-        raise ValueError("No images found in the specified directory!")
-
-    # Find out the frame size from the first image
-    frame = cv2.imread(os.path.join(image_folder, images[0]))
-    h, w, layers = frame.shape
-    size = (w, h)
-
-    # Define the codec and create VideoWriter object
-    out = cv2.VideoWriter(f"{output_video_path}/video.avi", cv2.VideoWriter_fourcc(*'DIVX'), fps, size)
-
-    for image in images:
-        img_path = os.path.join(image_folder, image)
-        frame = cv2.imread(img_path)
-        out.write(frame)
-
-    out.release()
