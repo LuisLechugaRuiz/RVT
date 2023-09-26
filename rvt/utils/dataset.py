@@ -192,6 +192,17 @@ def create_act_replay(
                 np.float32,
             )
         )
+        observation_elements.append(
+            ObservationElement(
+                "%s_point_cloud" % cname,
+                (
+                    3,
+                    IMAGE_SIZE,
+                    IMAGE_SIZE,
+                ),
+                np.float32,
+            )
+        )  # see pyrep/objects/vision_sensor.py on how pointclouds are extracted from depth frames
         # observation_elements.append(
         #    ObservationElement(
         #        "%s_rgba" % cname,
@@ -541,9 +552,10 @@ def fill_act_replay(
     num_demos: int,
     data_path: str,
     action_chunk_size: str,
-    description: str = "",
-    device="cpu",
+    episode_folder: str,
+    variation_desriptions_pkl: str,
     clip_model=None,
+    device="cpu",
 ):
     print("Replay disk saving:", replay._disk_saving)
     print("Storage:", task_replay_storage_folder)
@@ -570,10 +582,17 @@ def fill_act_replay(
             print("Filling demo %d" % d_idx)
             demo = get_stored_demo(data_path=data_path, index=d_idx)
 
+            # get language goal from disk
+            varation_descs_pkl_file = os.path.join(
+                data_path, episode_folder % d_idx, variation_desriptions_pkl
+            )
+            with open(varation_descs_pkl_file, "rb") as f:
+                descs = pickle.load(f)
+            description = descs[0]
+
             # extract keypoints
             episode_keypoints = keypoint_discovery(demo)
             demo, episode_keypoints = clean_samples(demo, episode_keypoints)
-            demo_images_path = f"data/demo_images/{d_idx}"
             _add_joint_positions(
                 replay,
                 task,
@@ -584,10 +603,7 @@ def fill_act_replay(
                 description,
                 device,
                 clip_model,
-                demo_images_path  # TODO: Remove, only for debugging.
             )
-            # demo_video_path = f"data/demo_video/{d_idx}"
-            # create_video_from_images(demo_images_path, demo_video_path)
 
         # save TERMINAL info in replay_info.npy
         task_idx = replay._task_index[task]
@@ -626,6 +642,7 @@ def _add_joint_positions(
                 k += 1
 
         obs_dict = extract_camera_data(obs, CAMERAS)
+        obs_dict['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
 
         tokens = clip.tokenize([description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
@@ -676,6 +693,7 @@ def _add_joint_positions(
         "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1)
     }
+    final_obs['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
     final_obs["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
@@ -722,7 +740,26 @@ def extract_camera_data(
                 for k, v in obs_dict.items() if isinstance(v, (np.ndarray, list))}
     for camera_name in cameras:
         camera_obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name]
+        camera_obs_dict['%s_point_cloud' % camera_name] = obs_dict['%s_point_cloud' % camera_name]
         camera_obs_dict['%s_camera_extrinsics' % camera_name] = obs.misc['%s_camera_extrinsics' % camera_name]
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
     return camera_obs_dict
+
+
+def get_low_dim_state(obs: Observation, t: int, episode_length: int):
+    if obs.gripper_joint_positions is not None:
+        obs.gripper_joint_positions = np.clip(
+            obs.gripper_joint_positions, 0., 0.04)
+
+    robot_state = np.array([
+        obs.gripper_open,
+        *obs.gripper_joint_positions])
+
+    low_dim_state = np.array(robot_state, dtype=np.float32)
+
+    # add timestep to low_dim_state
+    time = (1. - (t / float(episode_length - 1))) * 2. - 1.
+    low_dim_state = np.concatenate([low_dim_state, [time]]).astype(np.float32)
+
+    return low_dim_state

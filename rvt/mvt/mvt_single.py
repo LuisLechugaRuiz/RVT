@@ -50,7 +50,6 @@ class MVT(nn.Module):
         pe_fix,
         renderer_device="cuda:0",
         renderer=None,
-        # act_cfg_dict
     ):
         """MultiView Transfomer
 

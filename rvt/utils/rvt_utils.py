@@ -284,6 +284,7 @@ def load_agent(agent_path, agent=None, only_epoch=False):
                     "WARNING: loading states with strick=False! "
                     "KNOW WHAT YOU ARE DOING!!"
                 )
+                # We need strict False as now rvt_agent as parameters from act. In a future we should split both.
                 model.load_state_dict(checkpoint["model_state"], strict=False)
 
         if "optimizer_state" in checkpoint:

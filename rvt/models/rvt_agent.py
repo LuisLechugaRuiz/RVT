@@ -336,10 +336,16 @@ class RVTAgent:
         self._training = training
         self._device = device
 
+        # Get all parameters
+        all_parameters = list(self._network.named_parameters())
+
+        # Filter out the parameters of act_model
+        filtered_parameters = [param for name, param in all_parameters if "act_model" not in name]
+
         if self._optimizer_type == "lamb":
             # From: https://github.com/cybertronai/pytorch-lamb/blob/master/pytorch_lamb/lamb.py
             self._optimizer = Lamb(
-                self._network.parameters(),
+                filtered_parameters,
                 lr=self._lr,
                 weight_decay=self._lambda_weight_l2,
                 betas=(0.9, 0.999),
@@ -347,7 +353,7 @@ class RVTAgent:
             )
         elif self._optimizer_type == "adam":
             self._optimizer = torch.optim.Adam(
-                self._network.parameters(),
+                filtered_parameters,
                 lr=self._lr,
                 weight_decay=self._lambda_weight_l2,
             )
@@ -737,13 +743,14 @@ class RVTAgent:
         h = w = self._net_mod.img_size
         dyn_cam_info = None
 
+        propio_joint_abs = observation["joint_positions"].float().squeeze(0)
         rvt_out, act_out = self._network(
             pc=pc,
             img_feat=img_feat,
             proprio=proprio,
             lang_emb=lang_goal_embs,
             img_aug=0,  # no img augmentation while acting
-            propio_joint_abs=observation["joint_positions"]
+            proprio_joint_abs=propio_joint_abs
         )
         _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
             rvt_out, dims=(bs, nc, h, w), only_pred=True
@@ -751,6 +758,8 @@ class RVTAgent:
         pred_wpt, pred_rot_quat, pred_grip, pred_coll = self.get_pred(
             rvt_out, rot_q, grip_q, collision_q, y_q, rev_trans, dyn_cam_info
         )
+        a_hat, is_pad_hat, [mu, logvar] = act_out
+        act_action = a_hat.squeeze(0)
 
         continuous_action = np.concatenate(
             (
@@ -758,7 +767,7 @@ class RVTAgent:
                 pred_rot_quat[0],
                 pred_grip[0].cpu().numpy(),
                 pred_coll[0].cpu().numpy(),
-                act_out.cpu().numpy(),  # TODO: Verify this.
+                act_action.cpu().numpy().flatten(),
             )
         )
         if pred_distri:
@@ -888,14 +897,17 @@ class RVTAgent:
                 rev_trans.append(b)
             pc = pc_new
 
+        proprio_joint_abs = replay_sample["qpos"].squeeze(1)
+        actions = replay_sample["actions"].squeeze(1)
+        is_pad = replay_sample["is_pad"].squeeze(1)
         rvt_out, act_loss_dict = self._network(
             pc=pc,
             img_feat=img_feat,
             proprio=proprio,
             lang_emb=lang_goal_embs,
             img_aug=0,  # no img augmentation while acting
-            propio_joint_abs=replay_sample["qpos"],
-            actions=replay_sample["actions"],
-            is_pad=replay_sample["is_pad"]
+            proprio_joint_abs=proprio_joint_abs,
+            actions=actions,
+            is_pad=is_pad
         )
         return act_loss_dict

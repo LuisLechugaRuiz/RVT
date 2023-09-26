@@ -165,6 +165,7 @@ def get_act_dataset(
     refresh_replay,
     num_workers,
     training,
+    device,
     sample_distribution_mode="transition_uniform",
 ):
     replay_buffer = create_act_replay(
@@ -173,6 +174,15 @@ def get_act_dataset(
         disk_saving=True,
         cameras=CAMERAS,
     )
+
+    # load pre-trained language model
+    try:
+        clip_model, _ = clip.load("RN50", device="cpu")  # CLIP-ResNet50
+        clip_model = clip_model.to(device)
+        clip_model.eval()
+    except RuntimeError:
+        print("WARNING: Setting Clip to None. Will not work if replay not on disk.")
+        clip_model = None
 
     for task in tasks:
         if training:
@@ -199,8 +209,15 @@ def get_act_dataset(
             start_idx=0,
             num_demos=num_demos,
             data_path=data_path,
-            action_chunk_size=20, # TODO: Tune
+            action_chunk_size=20,  # TODO: Tune
+            episode_folder=EPISODE_FOLDER,
+            variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
+            clip_model=clip_model,
+            device=device,
         )
+
+    # delete the CLIP model since we have already extracted language features
+    del clip_model
 
     # wrap buffer with PyTorch dataset and make iterator
     wrapped_replay = PyTorchReplayBuffer(
