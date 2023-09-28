@@ -773,8 +773,8 @@ def expand_obs_dict(
     obs_dict,
     cameras,
 ):
-    obs_dict["low_dim_state"] = obs_dict["low_dim_state"].unsqueeze(0).unsqueeze(0)
+    obs_dict["low_dim_state"] = obs_dict["low_dim_state"].unsqueeze(0).unsqueeze(0).float()
     for camera_name in cameras:
-        obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name].unsqueeze(0).unsqueeze(0)
+        obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name].unsqueeze(0).unsqueeze(0).float()
         obs_dict['%s_point_cloud' % camera_name] = obs_dict['%s_point_cloud' % camera_name].unsqueeze(0).unsqueeze(0).float()
     return obs_dict
