@@ -53,11 +53,11 @@ from rvt.utils.rvt_utils import (
 from rvt.utils.rvt_utils import load_agent as load_agent_state
 
 # ACT:
-from act.act_policy import ACTPolicy
 from general_manipulation.act_executor import ACTExecutor
 from general_manipulation.act_action_mode import ACTActionMode
+from general_manipulation.utils import get_act_agent
 from rlbench.action_modes.arm_action_modes import JointPosition
-import general_manipulation.act_config as default_act_cfg
+
 
 def load_agent(
     model_path=None,
@@ -144,13 +144,8 @@ def load_agent(
 
             mvt_cfg.freeze()
 
-            act_cfg = default_act_cfg.get_cfg_defaults()
-            act_cfg.freeze()
-            act_cfg_dict = yaml.safe_load(act_cfg.dump())
-
             rvt = MVT(
                 renderer_device=device,
-                act_cfg_dict=act_cfg_dict,
                 **mvt_cfg,
             )
 
@@ -194,7 +189,7 @@ def eval(
     tasks,
     eval_datafolder,
     start_episode=0,
-    eval_episodes=10000,
+    eval_episodes=25,
     episode_length=25,
     replay_ground_truth=False,
     device=0,
@@ -204,8 +199,7 @@ def eval(
     verbose=True,
     save_video=False,
 ):
-    eval_episodes = 100
-    episode_length = 100
+    device = f"cuda:{device}"
     agent.eval()
     if isinstance(agent, rvt_agent.RVTAgent):
         agent.load_clip()
@@ -250,9 +244,10 @@ def eval(
         with open(stats_path, "rb") as f:
             norm_stats = pickle.load(f)
             print("DEBUG NORM_STATS:", norm_stats)
-    loading_status = agent._network.act_model.load_state_dict(torch.load(ckpt_path))
+    act_agent = get_act_agent(device=device)
+    loading_status = act_agent.act_model.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
-    act_executor = ACTExecutor(norm_stats, state_dim, num_queries)
+    act_executor = ACTExecutor(act_agent, norm_stats, state_dim, num_queries)
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)
@@ -287,8 +282,6 @@ def eval(
         record_every_n=1 if save_video else -1,
     )
     eval_env.eval = True
-
-    device = f"cuda:{device}"
 
     if logging:
         assert log_dir is not None

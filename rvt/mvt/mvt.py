@@ -11,12 +11,6 @@ from rvt.mvt.mvt_single import MVT as MVTSingle
 from rvt.mvt.config import get_cfg_defaults
 from rvt.mvt.renderer import BoxRenderer
 
-from general_manipulation.models.act_model import ACTModel
-
-# TODO: REMOVE ME LATER
-import cv2
-import numpy as np
-
 
 class MVT(nn.Module):
     def __init__(
@@ -45,7 +39,6 @@ class MVT(nn.Module):
         add_pixel_loc,
         add_depth,
         pe_fix,
-        act_cfg_dict,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer"""
@@ -55,7 +48,6 @@ class MVT(nn.Module):
         args = copy.deepcopy(locals())
         del args["self"]
         del args["__class__"]
-        del args["act_cfg_dict"]  # TODO: a bit hacky, clean it when refactoring code.
 
         # for verifying the input
         self.img_feat_dim = img_feat_dim
@@ -78,13 +70,6 @@ class MVT(nn.Module):
         self.img_size = img_size
 
         self.mvt1 = MVTSingle(**args, renderer=self.renderer)
-        self.act_model = ACTModel(act_cfg_dict, num_img=self.num_img)
-
-        # ONLY TO DEBUG -> REMOVE ME LATER!
-        self.frames = {}
-        self.img_frames = {}
-        self.num_steps = 100
-        self.output_filename = 'output.avi'
 
     def get_pt_loc_on_img(self, pt, dyn_cam_info, out=None):
         """
@@ -228,9 +213,6 @@ class MVT(nn.Module):
         proprio=None,
         lang_emb=None,
         img_aug=0,
-        proprio_joint_abs=None,
-        actions=None,
-        is_pad=None
     ):
         """
         :param pc: list of tensors, each tensor of shape (num_points, 3)
@@ -239,9 +221,6 @@ class MVT(nn.Module):
         :param proprio: tensor of shape (bs, proprio_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         :param img_aug: (float) magnitude of augmentation in rgb image
-        :param proprio_joint_abs: tensor of shape (bs, proprio_joint_abs_dim)
-        :param actions: tensor of shape (batch, seq, action_dim)
-        :param is_pad: tensor of shape (batch, seq, 1)
         """
 
         self.verify_inp(pc, img_feat, proprio, lang_emb, img_aug)
@@ -252,66 +231,7 @@ class MVT(nn.Module):
             dyn_cam_info=None,
         )
         mvt_out = self.mvt1(img=img, proprio=proprio, lang_emb=lang_emb)
-        img = self.add_hm(img, mvt_out["hm"])
-        act_out = self.act_model(img=img, proprio=proprio_joint_abs, actions=actions, is_pad=is_pad)
-        return mvt_out, act_out
-
-    def add_hm(self, img, hm):
-        bs = img.shape[0]
-        num_channels = hm.shape[1]
-        height = hm.shape[2]
-        width = hm.shape[3]
-
-        hm = hm.view(
-            bs, self.num_img, num_channels, height, width
-        )  # [bs * self.num_img, 1, h, w] -> [bs, self.num_img, 1, h, w]
-        img = torch.cat((img, hm), dim=2)
-
-        # TODO: REMOVE ME LATER!
-        for i in range(bs):
-            for j in range(self.num_img):
-                single_img = img[i, j, 3:6].cpu().numpy()
-                single_img = (single_img * 255).astype(np.uint8)
-                single_img = np.transpose(single_img, (1, 2, 0))
-                single_hm = hm[i, j].cpu().squeeze().numpy()
-
-                single_hm = cv2.normalize(single_hm, None, 0, 255, cv2.NORM_MINMAX)
-                single_hm_colored = cv2.applyColorMap(single_hm.astype(np.uint8), cv2.COLORMAP_JET).astype(np.uint8)
-                overlay = cv2.addWeighted(single_img, 0.6, single_hm_colored, 0.4, 0)
-
-                if j not in self.frames:
-                    self.frames[j] = []
-                    self.img_frames[j] = []
-                self.frames[j].append(overlay)
-                self.img_frames[j].append(single_img)
-
-        # If the number of steps is reached, create the video
-        if all(len(frames) >= self.num_steps for frames in self.frames.values()):
-            self.create_videos()
-            self.frames = {}  # Clear the frames
-            self.img_frames = {}
-
-        return img
-
-    # TODO: REMOVE ME LATER
-    def create_videos(self):
-        for camera_idx, frames in self.frames.items():
-            if frames:
-                self.create_video(frames, f"video_camera_{camera_idx}.avi")
-
-        for camera_idx, img_frames in self.img_frames.items():
-            if img_frames:
-                self.create_video(img_frames, f"video_camera_{camera_idx}_img_only.avi")
-
-    def create_video(self, frames, output_filename):
-        height, width, _ = frames[0].shape
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        video_out = cv2.VideoWriter(output_filename, fourcc, 20.0, (width, height))
-
-        for frame in frames:
-            video_out.write(frame)
-
-        video_out.release()
+        return mvt_out
 
     def free_mem(self):
         """

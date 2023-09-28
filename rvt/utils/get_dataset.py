@@ -157,11 +157,13 @@ def get_dataset(
 
 
 def get_act_dataset(
+    rvt_agent,
     tasks,
     batch_size,
     replay_storage_dir,
     data_folder,
     num_demos,
+    num_images,
     refresh_replay,
     num_workers,
     training,
@@ -173,6 +175,7 @@ def get_act_dataset(
         timesteps=1,
         disk_saving=True,
         cameras=CAMERAS,
+        num_images=num_images,
     )
 
     # load pre-trained language model
@@ -213,6 +216,7 @@ def get_act_dataset(
             episode_folder=EPISODE_FOLDER,
             variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
             clip_model=clip_model,
+            rvt_agent=rvt_agent,
             device=device,
         )
 

@@ -27,12 +27,6 @@ from rvt.utils.peract_utils import LOW_DIM_SIZE, IMAGE_SIZE, CAMERAS
 from rvt.libs.peract.helpers.demo_loading_utils import keypoint_discovery
 from rvt.libs.peract.helpers.utils import extract_obs
 
-# DEBUG
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import cv2
-import re
-
 
 def create_replay(
     batch_size: int,
@@ -168,9 +162,10 @@ def create_act_replay(
     timesteps: int,
     disk_saving: bool,
     cameras: list,
+    num_images: int = 5,
     replay_size=3e5,
 ):
-    qpos_size = 7
+    joint_positions_size = 7
     max_token_seq_len = 77
     lang_emb_dim = 512
 
@@ -203,17 +198,6 @@ def create_act_replay(
                 np.float32,
             )
         )  # see pyrep/objects/vision_sensor.py on how pointclouds are extracted from depth frames
-        # observation_elements.append(
-        #    ObservationElement(
-        #        "%s_rgba" % cname,
-        #        (
-        #            4,
-        #            IMAGE_SIZE,
-        #            IMAGE_SIZE,
-        #        ),
-        #        np.float32,
-        #    )
-        #)
         observation_elements.append(
             ObservationElement(
                 "%s_camera_extrinsics" % cname,
@@ -234,21 +218,23 @@ def create_act_replay(
                 np.float32,
             )
         )
-
-    # gripper_pose, target_pose and target_actions.
+    observation_elements.append(
+        ObservationElement(
+            "heatmap",
+            (
+                num_images,
+                1,
+                220, # TODO: Get from cfg
+                220,
+            ),
+            np.float32,
+        )
+    )
     observation_elements.extend(
         [
-            ReplayElement("qpos", (qpos_size,), np.float32),
-            ReplayElement("actions", (20, qpos_size), np.float32),
+            ReplayElement("joint_positions", (joint_positions_size,), np.float32),
+            ReplayElement("actions", (20, joint_positions_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
-            ReplayElement(
-                "lang_goal_embs",
-                (
-                    max_token_seq_len,
-                    lang_emb_dim,
-                ),  # extracted from CLIP's language encoder
-                np.float32,
-            ),
         ]
     )
     replay_buffer = (
@@ -257,7 +243,7 @@ def create_act_replay(
             batch_size=batch_size,
             timesteps=timesteps,
             replay_capacity=int(replay_size),
-            action_shape=(20, qpos_size), # Same as target_actions
+            action_shape=(20, joint_positions_size), # Same as target_actions
             action_dtype=np.float32,
             reward_shape=(),
             reward_dtype=np.float32,
@@ -554,7 +540,8 @@ def fill_act_replay(
     action_chunk_size: str,
     episode_folder: str,
     variation_desriptions_pkl: str,
-    clip_model=None,
+    clip_model,
+    rvt_agent,
     device="cpu",
 ):
     print("Replay disk saving:", replay._disk_saving)
@@ -601,8 +588,9 @@ def fill_act_replay(
                 episode_keypoints,
                 action_chunk_size,
                 description,
-                device,
                 clip_model,
+                rvt_agent,
+                device,
             )
 
         # save TERMINAL info in replay_info.npy
@@ -631,28 +619,29 @@ def _add_joint_positions(
     episode_keypoints: List[int],
     action_chunk_size: int,
     description: str,
+    clip_model,
+    rvt_agent,
     device: str,
-    clip_model=None
 ):
     k = 0
     for i in range(len(demo) - 1):
-        obs = demo[i]
+        calculate_heatmap = False
+        if i == 0:
+            # Get heatmap at first observation
+            calculate_heatmap = True
         if i == episode_keypoints[k]:
             if k < len(episode_keypoints) - 1:
                 k += 1
+                # Get heatmap on new keypoint
+                calculate_heatmap = True
 
+        obs = demo[i]
         obs_dict = extract_camera_data(obs, CAMERAS)
+
         obs_dict['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
 
-        tokens = clip.tokenize([description]).numpy()
-        token_tensor = torch.from_numpy(tokens).to(device)
-        with torch.no_grad():
-            lang_feats, lang_embs = _clip_encode_text(clip_model, token_tensor)
-        obs_dict["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
-
         # Fill actions_chunk
-        # last_index = min(i + action_chunk_size, episode_keypoints[k]) -> TODO: Enable when using keypoint as act input.
-        last_index = min(i + 1 + action_chunk_size, len(demo) - 1)
+        last_index = min(i + action_chunk_size, episode_keypoints[k])
         if i < len(demo) - 1:
             target_actions = [i.joint_positions for i in demo[i+1:last_index]]
         else:
@@ -667,12 +656,27 @@ def _add_joint_positions(
         # Padding to true as we are filling with duplicated data.
         is_pad += [True] * difference
 
-        final_obs = {
-            "qpos": obs.joint_positions,
+        extra_obs = {
+            "joint_positions": obs.joint_positions,
             "actions": target_actions,
             "is_pad": is_pad
         }
-        obs_dict.update(final_obs)
+        obs_dict.update(extra_obs)
+
+        if calculate_heatmap:
+            observation = obs_dict.copy()
+            tokens = clip.tokenize([description]).numpy()
+            token_tensor = torch.from_numpy(tokens).unsqueeze(0).to(device)
+            observation["lang_goal_tokens"] = token_tensor
+            observation = {
+                k: torch.tensor(v).to(device) if isinstance(v, np.ndarray) else v.to(device)
+                for k, v in observation.items()
+                if isinstance(v, (torch.Tensor, np.ndarray))
+            }
+            observation = expand_obs_dict(observation, CAMERAS)
+            rvt_result = rvt_agent.act(step=None, observation=observation)
+            heatmap = rvt_result.observation_elements["heatmap"]
+        obs_dict["heatmap"] = heatmap
 
         terminal = k == len(episode_keypoints) - 1
         reward = float(terminal) * 1.0 if terminal else 0
@@ -689,12 +693,12 @@ def _add_joint_positions(
     # Handling the final observation:
     obs_dict = extract_camera_data(demo[-1], CAMERAS)
     final_obs = {
-        "qpos": demo[-1].joint_positions,
+        "joint_positions": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1)
     }
+    final_obs["heatmap"] = heatmap
     final_obs['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
-    final_obs["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
 
@@ -763,3 +767,14 @@ def get_low_dim_state(obs: Observation, t: int, episode_length: int):
     low_dim_state = np.concatenate([low_dim_state, [time]]).astype(np.float32)
 
     return low_dim_state
+
+
+def expand_obs_dict(
+    obs_dict,
+    cameras,
+):
+    obs_dict["low_dim_state"] = obs_dict["low_dim_state"].unsqueeze(0).unsqueeze(0)
+    for camera_name in cameras:
+        obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name].unsqueeze(0).unsqueeze(0)
+        obs_dict['%s_point_cloud' % camera_name] = obs_dict['%s_point_cloud' % camera_name].unsqueeze(0).unsqueeze(0).float()
+    return obs_dict
