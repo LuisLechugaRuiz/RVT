@@ -42,9 +42,6 @@ from rvt.utils.peract_utils import (
     IMAGE_SIZE,
     get_official_peract,
 )
-from rvt.utils.rlbench_planning import (
-    EndEffectorPoseViaPlanning2 as EndEffectorPoseViaPlanning,
-)
 from rvt.utils.rvt_utils import (
     TensorboardManager,
     get_eval_parser,
