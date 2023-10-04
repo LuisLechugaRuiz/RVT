@@ -166,13 +166,8 @@ def create_act_replay(
     replay_size=3e5,
 ):
     joint_positions_size = 7
-    max_token_seq_len = 77
-    lang_emb_dim = 512
 
     observation_elements = []
-    observation_elements.append(
-        ObservationElement("low_dim_state", (LOW_DIM_SIZE,), np.float32)
-    )
 
     # rgb, intrinsics, extrinsics
     for cname in cameras:
@@ -218,23 +213,12 @@ def create_act_replay(
                 np.float32,
             )
         )
-    observation_elements.append(
-        ObservationElement(
-            "heatmap",
-            (
-                num_images,
-                1,
-                220, # TODO: Get from cfg
-                220,
-            ),
-            np.float32,
-        )
-    )
     observation_elements.extend(
         [
             ReplayElement("joint_positions", (joint_positions_size,), np.float32),
             ReplayElement("actions", (20, joint_positions_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
+            ReplayElement("keypoint", (3,), np.float32)
         ]
     )
     replay_buffer = (
@@ -243,7 +227,7 @@ def create_act_replay(
             batch_size=batch_size,
             timesteps=timesteps,
             replay_capacity=int(replay_size),
-            action_shape=(20, joint_positions_size), # Same as target_actions
+            action_shape=(20, joint_positions_size),  # Same as target_actions
             action_dtype=np.float32,
             reward_shape=(),
             reward_dtype=np.float32,
@@ -538,11 +522,6 @@ def fill_act_replay(
     num_demos: int,
     data_path: str,
     action_chunk_size: str,
-    episode_folder: str,
-    variation_desriptions_pkl: str,
-    clip_model,
-    rvt_agent,
-    device="cpu",
 ):
     print("Replay disk saving:", replay._disk_saving)
     print("Storage:", task_replay_storage_folder)
@@ -569,14 +548,6 @@ def fill_act_replay(
             print("Filling demo %d" % d_idx)
             demo = get_stored_demo(data_path=data_path, index=d_idx)
 
-            # get language goal from disk
-            varation_descs_pkl_file = os.path.join(
-                data_path, episode_folder % d_idx, variation_desriptions_pkl
-            )
-            with open(varation_descs_pkl_file, "rb") as f:
-                descs = pickle.load(f)
-            description = descs[0]
-
             # extract keypoints
             episode_keypoints = keypoint_discovery(demo)
             demo, episode_keypoints = clean_samples(demo, episode_keypoints)
@@ -587,10 +558,6 @@ def fill_act_replay(
                 demo,
                 episode_keypoints,
                 action_chunk_size,
-                description,
-                clip_model,
-                rvt_agent,
-                device,
             )
 
         # save TERMINAL info in replay_info.npy
@@ -618,27 +585,21 @@ def _add_joint_positions(
     demo: Demo,
     episode_keypoints: List[int],
     action_chunk_size: int,
-    description: str,
-    clip_model,
-    rvt_agent,
-    device: str,
 ):
     k = 0
     for i in range(len(demo) - 1):
-        calculate_heatmap = False
-        if i == 0:
-            # Get heatmap at first observation
-            calculate_heatmap = True
         if i == episode_keypoints[k]:
             if k < len(episode_keypoints) - 1:
                 k += 1
-                # Get heatmap on new keypoint
-                calculate_heatmap = True
 
         obs = demo[i]
         obs_dict = extract_camera_data(obs, CAMERAS)
 
-        obs_dict['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
+        if hasattr(obs, "waypoint") and obs.waypoint is not None:
+            keypoint = obs.waypoint[:3]
+        else:
+            keypoint_idx = episode_keypoints[k]
+            keypoint = demo[keypoint_idx].gripper_pose[:3]
 
         # Fill actions_chunk
         last_index = min(i + action_chunk_size, episode_keypoints[k])
@@ -659,24 +620,10 @@ def _add_joint_positions(
         extra_obs = {
             "joint_positions": obs.joint_positions,
             "actions": target_actions,
-            "is_pad": is_pad
+            "is_pad": is_pad,
+            "keypoint": keypoint
         }
         obs_dict.update(extra_obs)
-
-        if calculate_heatmap:
-            observation = obs_dict.copy()
-            tokens = clip.tokenize([description]).numpy()
-            token_tensor = torch.from_numpy(tokens).unsqueeze(0).to(device)
-            observation["lang_goal_tokens"] = token_tensor
-            observation = {
-                k: torch.tensor(v).to(device) if isinstance(v, np.ndarray) else v.to(device)
-                for k, v in observation.items()
-                if isinstance(v, (torch.Tensor, np.ndarray))
-            }
-            observation = expand_obs_dict(observation, CAMERAS)
-            rvt_result = rvt_agent.act(step=None, observation=observation)
-            heatmap = rvt_result.observation_elements["heatmap"]
-        obs_dict["heatmap"] = heatmap
 
         terminal = k == len(episode_keypoints) - 1
         reward = float(terminal) * 1.0 if terminal else 0
@@ -695,10 +642,9 @@ def _add_joint_positions(
     final_obs = {
         "joint_positions": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
-        "is_pad": [True] + [False] * (action_chunk_size - 1)
+        "is_pad": [True] + [False] * (action_chunk_size - 1),
+        "keypoint": keypoint
     }
-    final_obs["heatmap"] = heatmap
-    final_obs['low_dim_state'] = get_low_dim_state(obs, t=k, episode_length=25)
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
 
@@ -749,32 +695,3 @@ def extract_camera_data(
         camera_obs_dict['%s_camera_intrinsics' % camera_name] = obs.misc['%s_camera_intrinsics' % camera_name]
 
     return camera_obs_dict
-
-
-def get_low_dim_state(obs: Observation, t: int, episode_length: int):
-    if obs.gripper_joint_positions is not None:
-        obs.gripper_joint_positions = np.clip(
-            obs.gripper_joint_positions, 0., 0.04)
-
-    robot_state = np.array([
-        obs.gripper_open,
-        *obs.gripper_joint_positions])
-
-    low_dim_state = np.array(robot_state, dtype=np.float32)
-
-    # add timestep to low_dim_state
-    time = (1. - (t / float(episode_length - 1))) * 2. - 1.
-    low_dim_state = np.concatenate([low_dim_state, [time]]).astype(np.float32)
-
-    return low_dim_state
-
-
-def expand_obs_dict(
-    obs_dict,
-    cameras,
-):
-    obs_dict["low_dim_state"] = obs_dict["low_dim_state"].unsqueeze(0).unsqueeze(0).float()
-    for camera_name in cameras:
-        obs_dict['%s_rgb' % camera_name] = obs_dict['%s_rgb' % camera_name].unsqueeze(0).unsqueeze(0).float()
-        obs_dict['%s_point_cloud' % camera_name] = obs_dict['%s_point_cloud' % camera_name].unsqueeze(0).unsqueeze(0).float()
-    return obs_dict

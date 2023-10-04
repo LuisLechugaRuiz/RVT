@@ -425,7 +425,7 @@ class MVT(nn.Module):
         feat = torch.cat(feat, dim=-1)
         feat = self.feat_fc(feat)
 
-        out = {"trans": trans, "feat": feat, "hm": hm}
+        out = {"trans": trans, "feat": feat}
 
         return out
 
