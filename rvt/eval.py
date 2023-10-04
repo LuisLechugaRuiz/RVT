@@ -52,7 +52,7 @@ from rvt.utils.rvt_utils import load_agent as load_agent_state
 # ACT:
 from general_manipulation.act_executor import ACTExecutor
 from general_manipulation.act_action_mode import ACTActionMode
-from general_manipulation.utils import get_act_agent
+from general_manipulation.utils.load_agents import get_act_agent
 from rlbench.action_modes.arm_action_modes import JointPosition
 
 
@@ -244,7 +244,8 @@ def eval(
     act_agent = get_act_agent(device=device)
     loading_status = act_agent.act_model.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
-    act_executor = ACTExecutor(act_agent, norm_stats, state_dim, num_queries)
+    # act_executor = ACTExecutor(act_agent, norm_stats, state_dim, num_queries)
+    act_executor = ACTExecutor(act_agent, state_dim, num_queries)  # TODO: Add norm stats
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)

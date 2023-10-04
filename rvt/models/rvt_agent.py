@@ -759,7 +759,6 @@ class RVTAgent:
                 pred_coll[0].cpu().numpy(),
             )
         )
-        observation_elements = {"heatmap": rvt_out["hm"].cpu().numpy()}
         if pred_distri:
             x_distri = rot_grip_q[
                 0,
@@ -773,13 +772,13 @@ class RVTAgent:
                 0,
                 2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
             ]
-            return ActResult(action=continuous_action, observation_elements=observation_elements), (
+            return ActResult(action=continuous_action), (
                 x_distri.cpu().numpy(),
                 y_distri.cpu().numpy(),
                 z_distri.cpu().numpy(),
             )
         else:
-            return ActResult(continuous_action, observation_elements=observation_elements)
+            return ActResult(continuous_action)
 
     def get_pred(
         self,
