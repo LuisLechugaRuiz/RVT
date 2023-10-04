@@ -52,7 +52,7 @@ from rvt.utils.rvt_utils import load_agent as load_agent_state
 # ACT:
 from general_manipulation.act_executor import ACTExecutor
 from general_manipulation.act_action_mode import ACTActionMode
-from general_manipulation.utils import get_act_agent
+from general_manipulation.utils.load_agents import get_act_agent
 from rlbench.action_modes.arm_action_modes import JointPosition
 
 

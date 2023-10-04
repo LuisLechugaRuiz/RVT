@@ -759,7 +759,6 @@ class RVTAgent:
                 pred_coll[0].cpu().numpy(),
             )
         )
-        observation_elements = {"heatmap": rvt_out["hm"].cpu().numpy()}
         if pred_distri:
             x_distri = rot_grip_q[
                 0,
