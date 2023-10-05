@@ -162,7 +162,6 @@ def get_act_dataset(
     replay_storage_dir,
     data_folder,
     num_demos,
-    num_images,
     refresh_replay,
     num_workers,
     training,
@@ -173,7 +172,6 @@ def get_act_dataset(
         timesteps=1,
         disk_saving=True,
         cameras=CAMERAS,
-        num_images=num_images,
     )
     for task in tasks:
         if training:

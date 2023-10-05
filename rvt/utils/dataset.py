@@ -12,6 +12,7 @@ import pickle
 import logging
 import numpy as np
 from typing import List, Tuple
+from scipy.spatial.transform import Rotation
 
 import clip
 import peract_colab.arm.utils as utils
@@ -162,7 +163,6 @@ def create_act_replay(
     timesteps: int,
     disk_saving: bool,
     cameras: list,
-    num_images: int = 5,
     replay_size=3e5,
 ):
     joint_positions_size = 7
@@ -218,7 +218,7 @@ def create_act_replay(
             ReplayElement("joint_positions", (joint_positions_size,), np.float32),
             ReplayElement("actions", (20, joint_positions_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
-            ReplayElement("keypoint", (3,), np.float32)
+            ReplayElement("target_pose", (7,), np.float32)
         ]
     )
     replay_buffer = (
@@ -596,10 +596,11 @@ def _add_joint_positions(
         obs_dict = extract_camera_data(obs, CAMERAS)
 
         if hasattr(obs, "waypoint") and obs.waypoint is not None:
-            keypoint = obs.waypoint[:3]
+            quaternion = Rotation.from_euler('xyz', obs.waypoint[3:6], degrees=True).as_quat()
+            target_pose = np.concatenate((obs.waypoint[:3], quaternion))
         else:
             keypoint_idx = episode_keypoints[k]
-            keypoint = demo[keypoint_idx].gripper_pose[:3]
+            target_pose = demo[keypoint_idx].gripper_pose
 
         # Fill actions_chunk
         last_index = min(i + action_chunk_size, episode_keypoints[k])
@@ -621,7 +622,7 @@ def _add_joint_positions(
             "joint_positions": obs.joint_positions,
             "actions": target_actions,
             "is_pad": is_pad,
-            "keypoint": keypoint
+            "target_pose": target_pose
         }
         obs_dict.update(extra_obs)
 
@@ -643,7 +644,7 @@ def _add_joint_positions(
         "joint_positions": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1),
-        "keypoint": keypoint
+        "target_pose": target_pose
     }
     obs_dict.update(final_obs)
     replay.add_final(task, task_replay_storage_folder, **obs_dict)
