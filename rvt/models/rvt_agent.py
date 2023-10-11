@@ -5,9 +5,9 @@
 import pprint
 
 import torch
-import torchvision
 import numpy as np
 import torch.nn as nn
+from torch.nn import functional as F
 
 import clip
 from scipy.spatial.transform import Rotation
@@ -24,12 +24,18 @@ from yarr.agents.agent import ActResult
 from rvt.utils.dataset import _clip_encode_text
 from rvt.utils.lr_sched_utils import GradualWarmupScheduler
 
+import cv2  # DEBUG
+
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
     assert len(gt.shape) == 2
     dist = torch.linalg.vector_norm(gt - pred, dim=1)
     return {"avg err": dist.mean()}
+
+
+def eval_l1(gt, pred):
+    return {"avg err": F.l1_loss(gt, pred, reduction="none")}
 
 
 def eval_con_cls(gt, pred, num_bin=72, res=5, symmetry=1):
@@ -69,6 +75,8 @@ def eval_cls(gt, pred):
 
 
 def eval_all(
+    actions,
+    pred_actions,
     wpt,
     pred_wpt,
     action_rot,
@@ -88,6 +96,7 @@ def eval_all(
     assert action_collision_one_hot.shape == (bs, 2), action_collision_one_hot
     assert collision_q.shape == (bs, 2), collision_q
 
+    eval_actions = []
     eval_trans = []
     eval_rot_x = []
     eval_rot_y = []
@@ -96,6 +105,13 @@ def eval_all(
     eval_coll = []
 
     for i in range(bs):
+        eval_actions.append(
+            eval_l1(actions[i : i + 1], pred_actions[i : i + 1])["avg err"]
+            .cpu()
+            .numpy()
+            .item()
+        )
+
         eval_trans.append(
             eval_con(wpt[i : i + 1], pred_wpt[i : i + 1])["avg err"]
             .cpu()
@@ -144,12 +160,14 @@ def eval_all(
             .numpy()
         )
 
-    return eval_trans, eval_rot_x, eval_rot_y, eval_rot_z, eval_grip, eval_coll
+    return eval_actions, eval_trans, eval_rot_x, eval_rot_y, eval_rot_z, eval_grip, eval_coll
 
 
 def manage_eval_log(
     self,
     tasks,
+    actions,
+    pred_actions,
     wpt,
     pred_wpt,
     action_rot,
@@ -161,6 +179,7 @@ def manage_eval_log(
     reset_log=False,
 ):
     bs = len(wpt)
+    # TODO: add actions and pred_actions
     assert wpt.shape == (bs, 3), wpt
     assert pred_wpt.shape == (bs, 3), pred_wpt
     assert action_rot.shape == (bs, 4), action_rot
@@ -171,6 +190,7 @@ def manage_eval_log(
     assert collision_q.shape == (bs, 2), collision_q
 
     if not hasattr(self, "eval_trans") or reset_log:
+        self.eval_actions = {}
         self.eval_trans = {}
         self.eval_rot_x = {}
         self.eval_rot_y = {}
@@ -178,7 +198,9 @@ def manage_eval_log(
         self.eval_grip = {}
         self.eval_coll = {}
 
-    (eval_trans, eval_rot_x, eval_rot_y, eval_rot_z, eval_grip, eval_coll,) = eval_all(
+    (eval_actions, eval_trans, eval_rot_x, eval_rot_y, eval_rot_z, eval_grip, eval_coll,) = eval_all(
+        actions=actions,
+        pred_actions=pred_actions,
         wpt=wpt,
         pred_wpt=pred_wpt,
         action_rot=action_rot,
@@ -191,12 +213,14 @@ def manage_eval_log(
 
     for idx, task in enumerate(tasks):
         if not (task in self.eval_trans):
+            self.eval_actions[task] = []
             self.eval_trans[task] = []
             self.eval_rot_x[task] = []
             self.eval_rot_y[task] = []
             self.eval_rot_z[task] = []
             self.eval_grip[task] = []
             self.eval_coll[task] = []
+        self.eval_actions[task].append(eval_actions[idx])
         self.eval_trans[task].append(eval_trans[idx])
         self.eval_rot_x[task].append(eval_rot_x[idx])
         self.eval_rot_y[task].append(eval_rot_y[idx])
@@ -205,6 +229,7 @@ def manage_eval_log(
         self.eval_coll[task].append(eval_coll[idx])
 
     return {
+        "eval_actions": eval_actions,
         "eval_trans": eval_trans,
         "eval_rot_x": eval_rot_x,
         "eval_rot_y": eval_rot_y,
@@ -214,6 +239,7 @@ def manage_eval_log(
 
 def print_eval_log(self):
     logs = {
+        "actions": self.eval_actions,
         "trans": self.eval_trans,
         "rot_x": self.eval_rot_x,
         "rot_y": self.eval_rot_y,
@@ -288,6 +314,8 @@ class RVTAgent:
         scene_bounds: list = peract_utils.SCENE_BOUNDS,
         cameras: list = peract_utils.CAMERAS,
         log_dir="",
+        act_loss_weight: float = 1.0,
+        rvt_loss_weight: float = 1.0
     ):
         """
         :param gt_hm_sigma: the std of the groundtruth hm, currently for for
@@ -323,6 +351,8 @@ class RVTAgent:
         self.scene_bounds = scene_bounds
         self.cameras = cameras
         self.move_pc_in_bound = move_pc_in_bound
+        self.act_loss_weight = act_loss_weight
+        self.rvt_loss_weight = rvt_loss_weight
 
         self._cross_entropy_loss = nn.CrossEntropyLoss(reduction="none")
         if isinstance(self._network, DistributedDataParallel):
@@ -335,6 +365,9 @@ class RVTAgent:
     def build(self, training: bool, device: torch.device = None):
         self._training = training
         self._device = device
+
+        if self._training:
+            self._network.mvt1.debug = False
 
         if self._optimizer_type == "lamb":
             # From: https://github.com/cybertronai/pytorch-lamb/blob/master/pytorch_lamb/lamb.py
@@ -499,7 +532,11 @@ class RVTAgent:
         lang_goal_embs = replay_sample["lang_goal_embs"][:, -1].float()
         tasks = replay_sample["tasks"]
 
-        proprio = arm_utils.stack_on_channel(replay_sample["low_dim_state"])  # (b, 4)
+        actions = replay_sample["actions"].squeeze(1)
+        is_pad = replay_sample["is_pad"].squeeze(1)
+        proprio_joint_pos = replay_sample["joint_positions"].squeeze(1)  # (b, 7)
+
+        proprio_cartesian = arm_utils.stack_on_channel(replay_sample["low_dim_state"])  # (b, 4)
         return_out = {}
 
         obs, pcd = peract_utils._preprocess_inputs(replay_sample, self.cameras)
@@ -510,6 +547,7 @@ class RVTAgent:
                 pcd,
             )
 
+            self._transform_augmentation = False
             if self._transform_augmentation and backprop:
                 action_trans_con, action_rot, pc = apply_se3_aug_con(
                     pcd=pc,
@@ -569,12 +607,13 @@ class RVTAgent:
 
             dyn_cam_info = None
 
-        out, act_out = self._network(
+        out = self._network(
             pc=pc,
             img_feat=img_feat,
-            proprio=proprio,
+            proprio_cartesian=proprio_cartesian,
+            proprio_joint_pos=proprio_joint_pos,
             lang_emb=lang_goal_embs,
-            img_aug=img_aug,
+            img_aug=img_aug
         )
 
         q_trans, rot_q, grip_q, collision_q, y_q, pts = self.get_q(
@@ -593,6 +632,22 @@ class RVTAgent:
         action_trans = self.get_action_trans(
             wpt_local, pts, out, dyn_cam_info, dims=(bs, nc, h, w)
         )
+        pred_actions = out["actions"]
+
+        q_hm = torch.nn.functional.softmax(q_trans, 1)
+        debug_q = q_hm.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        debug_a = action_trans.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        bs = len(pc)
+        nc = self._net_mod.num_img
+        h = w = self._net_mod.img_size
+        for b in range(bs):
+            for n in range(nc):
+                n_q = cv2.normalize(debug_q[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                n_a = cv2.normalize(debug_a[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                time = proprio_cartesian[b, 3]
+                # cv2.imwrite(f"pred_batch{b}_img{n}_time{time}.png", n_q)
+                # cv2.imwrite(f"gt_batch{b}_img{n}_time{time}.png", n_a)
+
 
         loss_log = {}
         if backprop:
@@ -635,7 +690,7 @@ class RVTAgent:
                     collision_q, action_collision_one_hot.argmax(-1)
                 ).mean()
 
-            total_loss = (
+            rvt_total_loss = (
                 trans_loss
                 + rot_loss_x
                 + rot_loss_y
@@ -643,6 +698,10 @@ class RVTAgent:
                 + grip_loss
                 + collision_loss
             )
+            act_all_l1 = F.l1_loss(actions, pred_actions, reduction="none")
+            act_l1 = (act_all_l1 * ~is_pad.unsqueeze(-1)).mean()
+
+            total_loss = self.rvt_loss_weight * rvt_total_loss + self.act_loss_weight * act_l1
 
             self._optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
@@ -651,6 +710,8 @@ class RVTAgent:
 
             loss_log = {
                 "total_loss": total_loss.item(),
+                "rvt_loss": rvt_total_loss.item(),
+                "act_loss": act_l1.item(),
                 "trans_loss": trans_loss.item(),
                 "rot_loss_x": rot_loss_x.item(),
                 "rot_loss_y": rot_loss_y.item(),
@@ -665,6 +726,7 @@ class RVTAgent:
         if eval_log:
             with torch.no_grad():
                 wpt = torch.cat([x.unsqueeze(0) for x in wpt])
+                self._net_mod.free_mem()
                 pred_wpt, pred_rot_quat, _, _ = self.get_pred(
                     out,
                     rot_q,
@@ -678,6 +740,8 @@ class RVTAgent:
                 return_log = manage_eval_log(
                     self=self,
                     tasks=tasks,
+                    actions=actions,
+                    pred_actions=pred_actions,
                     wpt=wpt,
                     pred_wpt=pred_wpt,
                     action_rot=action_rot,
@@ -695,8 +759,7 @@ class RVTAgent:
 
     @torch.no_grad()
     def act(
-        self, step: int, observation: dict, deterministic=True, pred_distri=False
-    ) -> ActResult:
+        self, step: int, observation: dict, deterministic=True, pred_distri=False) -> ActResult:
         if self.add_lang:
             lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
             _, lang_goal_embs = _clip_encode_text(self.clip_model, lang_goal_tokens[0])
@@ -707,7 +770,9 @@ class RVTAgent:
                 .float()
                 .to(self._device)
             )
-        proprio = arm_utils.stack_on_channel(observation["low_dim_state"])
+        proprio_joint_pos = observation["joint_positions"].squeeze(1)  # (b, 7)
+        proprio_cartesian = arm_utils.stack_on_channel(observation["low_dim_state"])
+        # print("DEBUG - CARTESIAN PROPRIO:", proprio_cartesian)
 
         obs, pcd = peract_utils._preprocess_inputs(observation, self.cameras)
         pc, img_feat = rvt_utils.get_pc_img_feat(
@@ -737,19 +802,32 @@ class RVTAgent:
         h = w = self._net_mod.img_size
         dyn_cam_info = None
 
-        rvt_out = self._network(
+        out = self._network(
             pc=pc,
             img_feat=img_feat,
-            proprio=proprio,
+            proprio_cartesian=proprio_cartesian,
+            proprio_joint_pos=proprio_joint_pos,
             lang_emb=lang_goal_embs,
             img_aug=0,  # no img augmentation while acting
         )
-        _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
-            rvt_out, dims=(bs, nc, h, w), only_pred=True
+        q_trans, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
+            out, dims=(bs, nc, h, w), only_pred=True
         )
         pred_wpt, pred_rot_quat, pred_grip, pred_coll = self.get_pred(
-            rvt_out, rot_q, grip_q, collision_q, y_q, rev_trans, dyn_cam_info
+            out, rot_q, grip_q, collision_q, y_q, rev_trans, dyn_cam_info
         )
+
+        # print("DEBUG - CARTESIAN PROPRIO:", proprio_cartesian)
+        q_hm = torch.nn.functional.softmax(q_trans, 1)
+        debug_q = q_hm.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        bs = len(pc)
+        nc = self._net_mod.num_img
+        h = w = self._net_mod.img_size
+        for b in range(bs):
+            for n in range(nc):
+                n_q = cv2.normalize(debug_q[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                time = proprio_cartesian[b, 3]
+                # cv2.imwrite(f"pred_batch{b}_img{n}_time{time}.png", n_q)
 
         continuous_action = np.concatenate(
             (
@@ -757,6 +835,7 @@ class RVTAgent:
                 pred_rot_quat[0],
                 pred_grip[0].cpu().numpy(),
                 pred_coll[0].cpu().numpy(),
+                out["actions"].cpu().numpy().ravel(),
             )
         )
         if pred_distri:

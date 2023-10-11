@@ -39,6 +39,7 @@ class MVT(nn.Module):
         add_pixel_loc,
         add_depth,
         pe_fix,
+        act_cfg_dict,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer"""
@@ -48,6 +49,7 @@ class MVT(nn.Module):
         args = copy.deepcopy(locals())
         del args["self"]
         del args["__class__"]
+        del args["act_cfg_dict"]
 
         # for verifying the input
         self.img_feat_dim = img_feat_dim
@@ -69,7 +71,7 @@ class MVT(nn.Module):
         self.num_img = self.renderer.num_img
         self.img_size = img_size
 
-        self.mvt1 = MVTSingle(**args, renderer=self.renderer)
+        self.mvt1 = MVTSingle(**args, act_cfg_dict=act_cfg_dict, renderer=self.renderer)
 
     def get_pt_loc_on_img(self, pt, dyn_cam_info, out=None):
         """
@@ -210,7 +212,8 @@ class MVT(nn.Module):
         self,
         pc,
         img_feat,
-        proprio=None,
+        proprio_cartesian=None,
+        proprio_joint_pos=None,
         lang_emb=None,
         img_aug=0,
     ):
@@ -218,19 +221,20 @@ class MVT(nn.Module):
         :param pc: list of tensors, each tensor of shape (num_points, 3)
         :param img_feat: list tensors, each tensor of shape
             (bs, num_points, img_feat_dim)
-        :param proprio: tensor of shape (bs, proprio_dim)
+        :param proprio_cartesian: tensor of shape (bs, proprio_cartesian_dim)
+        :param proprio_joint_pos: tensor of shape (bs, proprio_joint_pos_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         :param img_aug: (float) magnitude of augmentation in rgb image
         """
 
-        self.verify_inp(pc, img_feat, proprio, lang_emb, img_aug)
+        self.verify_inp(pc, img_feat, proprio_cartesian, lang_emb, img_aug)
         img = self.render(
             pc,
             img_feat,
             img_aug,
             dyn_cam_info=None,
         )
-        mvt_out = self.mvt1(img=img, proprio=proprio, lang_emb=lang_emb)
+        mvt_out = self.mvt1(img=img, proprio_cartesian=proprio_cartesian, proprio_joint_pos=proprio_joint_pos, lang_emb=lang_emb)
         return mvt_out
 
     def free_mem(self):

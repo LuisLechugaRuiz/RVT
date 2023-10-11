@@ -1,0 +1,15 @@
+exp_id: rvt
+tasks: "push_buttons,close_jar"
+bs: 2
+num_workers: 1
+epochs: 28 # 2 more epochs
+sample_distribution_mode: task_uniform
+peract:
+  lr: 1e-4
+  warmup_steps: 0  # Originally 2000, modifying it for fine-tuning
+  optimizer_type: lamb
+  lr_cos_dec: True  # Originally True, modifying it for fine-tuning
+  transform_augmentation_xyz: [0.125, 0.125, 0.125]
+  transform_augmentation_rpy: [0.0, 0.0, 45.0]
+rvt:
+  place_with_mean: False

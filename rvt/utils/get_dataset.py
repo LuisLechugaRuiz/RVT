@@ -3,20 +3,16 @@
 # Licensed under the NVIDIA Source Code License [see LICENSE for details].
 
 import os
-import sys
 import shutil
 import torch
 import clip
 
-from rvt.libs.peract.helpers.utils import extract_obs
-from rvt.utils.rvt_utils import ForkedPdb
-from rvt.utils.dataset import create_act_replay, create_replay, fill_act_replay, fill_replay
+from rvt.utils.dataset import create_replay, fill_replay
 from rvt.utils.peract_utils import (
     CAMERAS,
     SCENE_BOUNDS,
     EPISODE_FOLDER,
     VARIATION_DESCRIPTIONS_PKL,
-    DEMO_AUGMENTATION_EVERY_N,
     ROTATION_RESOLUTION,
     VOXEL_SIZES,
 )
@@ -25,6 +21,7 @@ from yarr.replay_buffer.wrappers.pytorch_replay_buffer import PyTorchReplayBuffe
 
 def get_dataset(
     tasks,
+    action_chunk_size,
     BATCH_SIZE_TRAIN,
     BATCH_SIZE_TEST,
     TRAIN_REPLAY_STORAGE_DIR,
@@ -40,6 +37,7 @@ def get_dataset(
 ):
 
     train_replay_buffer = create_replay(
+        action_chunk_size,
         batch_size=BATCH_SIZE_TRAIN,
         timesteps=1,
         disk_saving=True,
@@ -48,6 +46,7 @@ def get_dataset(
     )
     if not only_train:
         test_replay_buffer = create_replay(
+            action_chunk_size,
             batch_size=BATCH_SIZE_TEST,
             timesteps=1,
             disk_saving=True,
@@ -94,13 +93,10 @@ def get_dataset(
             task_replay_storage_folder=train_replay_storage_folder,
             start_idx=0,
             num_demos=NUM_TRAIN,
-            demo_augmentation=True,
-            demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
-            cameras=CAMERAS,
+            action_chunk_size=action_chunk_size,
             rlbench_scene_bounds=SCENE_BOUNDS,
             voxel_sizes=VOXEL_SIZES,
             rotation_resolution=ROTATION_RESOLUTION,
-            crop_augmentation=False,
             data_path=data_path_train,
             episode_folder=EPISODE_FOLDER,
             variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
@@ -116,13 +112,10 @@ def get_dataset(
                 task_replay_storage_folder=test_replay_storage_folder,
                 start_idx=0,
                 num_demos=NUM_VAL,
-                demo_augmentation=True,
-                demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
-                cameras=CAMERAS,
+                action_chunk_size=action_chunk_size,
                 rlbench_scene_bounds=SCENE_BOUNDS,
                 voxel_sizes=VOXEL_SIZES,
                 rotation_resolution=ROTATION_RESOLUTION,
-                crop_augmentation=False,
                 data_path=data_path_val,
                 episode_folder=EPISODE_FOLDER,
                 variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
@@ -154,60 +147,3 @@ def get_dataset(
         )
         test_dataset = test_wrapped_replay.dataset()
     return train_dataset, test_dataset
-
-
-def get_act_dataset(
-    tasks,
-    batch_size,
-    replay_storage_dir,
-    data_folder,
-    num_demos,
-    refresh_replay,
-    num_workers,
-    training,
-    sample_distribution_mode="transition_uniform",
-):
-    replay_buffer = create_act_replay(
-        batch_size=batch_size,
-        timesteps=1,
-        disk_saving=True,
-        cameras=CAMERAS,
-    )
-    for task in tasks:
-        if training:
-            folder = "train"
-        else:
-            folder = "test"
-        EPISODES_FOLDER = f"{folder}/{task}/all_variations/episodes"
-        data_path = os.path.join(data_folder, EPISODES_FOLDER)
-        replay_storage_folder = f"{replay_storage_dir}/{task}"
-
-        # if refresh_replay, then remove the existing replay data folder
-        if refresh_replay:
-            print("[Info] Remove existing replay dataset as requested.", flush=True)
-            if os.path.exists(replay_storage_folder) and os.path.isdir(
-                replay_storage_folder
-            ):
-                shutil.rmtree(replay_storage_folder)
-                print(f"remove {replay_storage_folder}")
-
-        fill_act_replay(
-            replay=replay_buffer,
-            task=task,
-            task_replay_storage_folder=replay_storage_folder,
-            start_idx=0,
-            num_demos=num_demos,
-            data_path=data_path,
-            action_chunk_size=20,  # TODO: Tune
-        )
-
-    # wrap buffer with PyTorch dataset and make iterator
-    wrapped_replay = PyTorchReplayBuffer(
-        replay_buffer,
-        sample_mode='random',
-        num_workers=num_workers,
-        sample_distribution_mode=sample_distribution_mode,
-    )
-    dataset = wrapped_replay.dataset()
-
-    return dataset
