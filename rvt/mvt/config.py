@@ -31,7 +31,6 @@ _C.add_pixel_loc = True
 _C.add_depth = True
 _C.pe_fix = True
 
-
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()

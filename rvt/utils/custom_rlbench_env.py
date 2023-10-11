@@ -3,11 +3,13 @@
 # Licensed under the NVIDIA Source Code License [see LICENSE for details].
 
 from rvt.libs.peract.helpers.custom_rlbench_env import CustomMultiTaskRLBenchEnv
+import numpy as np
 
 
 class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
     def __init__(self, *args, **kwargs):
         super(CustomMultiTaskRLBenchEnv2, self).__init__(*args, **kwargs)
+        self.threshold = 0.002
 
     def reset(self) -> dict:
         super().reset()
@@ -24,7 +26,7 @@ class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
             self._episodes_this_task = 0
         self._episodes_this_task += 1
 
-        self._i = 0
+        self._i = 1
         self._task.set_variation(-1)
         d = self._task.get_demos(
             1, live_demos=False, random_selection=False, from_episode_number=i
@@ -44,3 +46,13 @@ class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
         self._recorded_images.clear()
 
         return self._previous_obs_dict
+
+    def validate_action(self, action, observation):
+        # TODO: Evaluate also rotation
+        return (
+            self.euclidean_distance(observation["gripper_pose"][:3], action[:3])
+            < self.threshold
+        )
+
+    def euclidean_distance(self, pos1, pos2):
+        return np.linalg.norm(np.array(pos1) - np.array(pos2))

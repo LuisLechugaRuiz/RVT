@@ -39,6 +39,9 @@ from rvt.utils.peract_utils import (
     DATA_FOLDER,
 )
 
+import general_manipulation.config.act_config as default_act_cfg
+
+
 # new train takes the dataset as input
 def train(agent, dataset, training_iterations, rank=0):
     agent.train()
@@ -47,10 +50,10 @@ def train(agent, dataset, training_iterations, rank=0):
     data_iter = iter(dataset)
     iter_command = range(training_iterations)
 
-    for iteration in tqdm.tqdm(
+    tbar = tqdm.tqdm(
         iter_command, disable=(rank != 0), position=0, leave=True
-    ):
-
+    )
+    for iteration in tbar:
         raw_batch = next(data_iter)
         batch = {
             k: v.to(agent._device)
@@ -70,7 +73,9 @@ def train(agent, dataset, training_iterations, rank=0):
                 "eval_log": False,
             }
         )
-        agent.update(**update_args)
+        out = agent.update(**update_args)
+        rvt_loss, act_loss, total_loss = out["rvt_loss"], out["act_loss"], out["total_loss"]
+        tbar.set_description(f"RVT: {rvt_loss:.4f}, ACT: {act_loss:.4f}, Total: {total_loss:.4f}")
 
     if rank == 0:
         log = print_loss_log(agent)
@@ -166,7 +171,8 @@ def experiment(rank, cmd_args, devices, port):
     BATCH_SIZE_TRAIN = exp_cfg.bs
     NUM_TRAIN = 100
     # to match peract, iterations per epoch
-    TRAINING_ITERATIONS = int(10000 // (exp_cfg.bs * len(devices) / 16))
+    # TRAINING_ITERATIONS = int(10000 // (exp_cfg.bs * len(devices) / 16))
+    TRAINING_ITERATIONS = 20000
     EPOCHS = exp_cfg.epochs
     TRAIN_REPLAY_STORAGE_DIR = "replay/replay_train"
     TEST_REPLAY_STORAGE_DIR = "replay/replay_val"
@@ -175,8 +181,11 @@ def experiment(rank, cmd_args, devices, port):
     print("Training on {} tasks: {}".format(len(tasks), tasks))
 
     t_start = time.time()
+
+    action_chunk_size = 20  # TODO: Get from act cfg    
     get_dataset_func = lambda: get_dataset(
         tasks,
+        action_chunk_size,
         BATCH_SIZE_TRAIN,
         None,
         TRAIN_REPLAY_STORAGE_DIR,
@@ -204,9 +213,14 @@ def experiment(rank, cmd_args, devices, port):
         mvt_cfg.feat_dim = get_num_feat(exp_cfg.peract)
         mvt_cfg.freeze()
 
+        act_cfg = default_act_cfg.get_cfg_defaults()
+        act_cfg.freeze()
+        act_cfg_dict = yaml.safe_load(act_cfg.dump())
+
         torch.cuda.set_device(device)
         torch.cuda.empty_cache()
         rvt = MVT(
+            act_cfg_dict=act_cfg_dict,
             renderer_device=device,
             **mvt_cfg,
         ).to(device)
@@ -221,6 +235,8 @@ def experiment(rank, cmd_args, devices, port):
             cameras=CAMERAS,
             log_dir=f"{log_dir}/test_run/",
             cos_dec_max_step=EPOCHS * TRAINING_ITERATIONS,
+            act_loss_weight=act_cfg_dict["act_loss_weight"],
+            rvt_loss_weight=act_cfg_dict["rvt_loss_weight"],
             **exp_cfg.peract,
             **exp_cfg.rvt,
         )

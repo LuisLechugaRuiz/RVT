@@ -20,6 +20,9 @@ from rvt.mvt.attn import (
     FeedForward,
 )
 
+from general_manipulation.utils.video_recorder import VideoRecorder
+from general_manipulation.models.act_cvae import ACTCVAE
+
 
 class MVT(nn.Module):
     def __init__(
@@ -48,6 +51,7 @@ class MVT(nn.Module):
         add_pixel_loc,
         add_depth,
         pe_fix,
+        act_cfg_dict,
         renderer_device="cuda:0",
         renderer=None,
     ):
@@ -88,7 +92,7 @@ class MVT(nn.Module):
         self.img_feat_dim = img_feat_dim
         self.img_size = img_size
         self.add_proprio = add_proprio
-        self.proprio_dim = proprio_dim
+        self.proprio_cartesian_dim = proprio_dim
         self.add_lang = add_lang
         self.lang_dim = lang_dim
         self.lang_len = lang_len
@@ -102,19 +106,29 @@ class MVT(nn.Module):
         self.add_pixel_loc = add_pixel_loc
         self.add_depth = add_depth
         self.pe_fix = pe_fix
+        self.attn_heads = attn_heads
+
+        # ACT
+        self.proprio_joint_pos_dim = act_cfg_dict["proprio_dim"]
+        self.dim_feedforward = act_cfg_dict["dim_feedforward"]
+        self.normalize_before = act_cfg_dict["normalize_before"]
+        self.num_decoder_layers = act_cfg_dict["num_decoder_layers"]
+        self.num_queries = act_cfg_dict["num_queries"]
+        self.state_dim = act_cfg_dict["state_dim"]
+        self.debug = act_cfg_dict["debug"]
 
         print(f"MVT Vars: {vars(self)}")
 
-        assert not renderer is None
+        assert renderer is not None
         self.renderer = renderer
         self.num_img = self.renderer.num_img
 
         # patchified input dimensions
-        spatial_size = img_size // self.img_patch_size  # 128 / 8 = 16
+        spatial_size = img_size // self.img_patch_size  # 220 / 11 = 20
 
         if self.add_proprio:
-            # 64 img features + 64 proprio features
-            self.input_dim_before_seq = self.im_channels * 2
+            # 64 img features + 128 proprio features (64 cartesian + 64 joint pos)
+            self.input_dim_before_seq = self.im_channels * 3
         else:
             self.input_dim_before_seq = self.im_channels
 
@@ -171,8 +185,15 @@ class MVT(nn.Module):
 
         if self.add_proprio:
             # proprio preprocessing encoder
-            self.proprio_preprocess = DenseBlock(
-                self.proprio_dim,
+            self.proprio_cartesian_preprocess = DenseBlock(
+                self.proprio_cartesian_dim,
+                self.im_channels,
+                norm="group",
+                activation=activation,
+            )
+            # proprio preprocessing encoder
+            self.proprio_joint_pos_preprocess = DenseBlock(
+                self.proprio_joint_pos_dim,
                 self.im_channels,
                 norm="group",
                 activation=activation,
@@ -192,7 +213,7 @@ class MVT(nn.Module):
         if self.add_lang:
             self.lang_preprocess = DenseBlock(
                 lang_emb_dim,
-                self.im_channels * 2,
+                self.input_dim_before_seq,
                 norm="group",
                 activation=activation,
             )
@@ -274,6 +295,28 @@ class MVT(nn.Module):
             nn.Linear(feat_fc_dim // 2, feat_out_size),
         )
 
+        self.pos_embed_decoder = nn.Parameter(
+            torch.randn(
+                1,
+                num_pe_token,
+                attn_dim,
+            )
+        )
+
+        self.query_embed = nn.Embedding(self.num_queries, attn_dim)
+        self.decoder = ACTCVAE.build_decoder(
+            hidden_dim=attn_dim,
+            dropout=attn_dropout,
+            nhead=attn_heads,
+            dim_feedforward=self.dim_feedforward,
+            num_decoder_layers=self.num_decoder_layers,
+            normalize_before=self.normalize_before,
+        )
+        self.action_head = nn.Linear(attn_dim, self.state_dim)
+        self.is_pad_head = nn.Linear(attn_dim, 1)
+
+        self.video_recorder = VideoRecorder(num_img=self.num_img)
+
     def get_pt_loc_on_img(self, pt, dyn_cam_info):
         """
         transform location of points in the local frame to location on the
@@ -289,15 +332,18 @@ class MVT(nn.Module):
     def forward(
         self,
         img,
-        proprio=None,
+        proprio_cartesian=None,
+        proprio_joint_pos=None,
         lang_emb=None,
     ):
         """
         :param img: tensor of shape (bs, num_img, img_feat_dim, h, w)
-        :param proprio: tensor of shape (bs, priprio_dim)
+        :param proprio_cartesian: tensor of shape (bs, proprio_cartesian_dim)
+        :param proprio_joint_pos: tensor of shape (bs, proprio_joint_pos_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         """
 
+        original_img = img
         bs, num_img, img_feat_dim, h, w = img.shape
         num_pat_img = h // self.img_patch_size
         assert num_img == self.num_img
@@ -328,18 +374,37 @@ class MVT(nn.Module):
         # concat proprio
         _, _, _d, _h, _w = ins.shape
         if self.add_proprio:
-            p = self.proprio_preprocess(proprio)  # [B,4] -> [B,64]
-            p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w)
-            ins = torch.cat([ins, p], dim=1)  # [B, 128, num_img, np, np]
+
+            def expand_dims(tensor, d, h, w):
+                return (
+                    tensor.unsqueeze(-1)
+                    .unsqueeze(-1)
+                    .unsqueeze(-1)
+                    .repeat(1, 1, d, h, w)
+                )
+
+            p_cartesian = self.proprio_cartesian_preprocess(
+                proprio_cartesian
+            )  # [B,4] -> [B,64]
+            p_cartesian = expand_dims(p_cartesian, _d, _h, _w)
+
+            p_joint_pos = self.proprio_joint_pos_preprocess(
+                proprio_joint_pos
+            )  # [B,7] -> [B,64]
+            p_joint_pos = expand_dims(p_joint_pos, _d, _h, _w)
+
+            ins = torch.cat(
+                [ins, p_cartesian, p_joint_pos], dim=1
+            )  # [B, 192, num_img, np, np]
 
         # channel last
-        ins = rearrange(ins, "b d ... -> b ... d")  # [B, num_img, np, np, 128]
+        ins = rearrange(ins, "b d ... -> b ... d")  # [B, num_img, np, np, 192]
 
         # save original shape of input for layer
         ins_orig_shape = ins.shape
 
         # flatten patches into sequence
-        ins = rearrange(ins, "b ... d -> b (...) d")  # [B, num_img * np * np, 128]
+        ins = rearrange(ins, "b ... d -> b (...) d")  # [B, num_img * np * np, 192]
         # add learable pos encoding
         # only added to image tokens
         if self.pe_fix:
@@ -353,7 +418,8 @@ class MVT(nn.Module):
             )
             l = l.view(bs, self.lang_max_seq_len, -1)
             num_lang_tok = l.shape[1]
-            ins = torch.cat((l, ins), dim=1)  # [B, num_img * np * np + 77, 128]
+            l_repeated = l.unsqueeze(1).repeat(1, num_img, 1, 1).view(bs, num_img * num_lang_tok, -1)
+            ins = torch.cat((l_repeated, ins), dim=1)  # [B, num_img * np * np + num_img * lang_max_seq_len, 192]
 
         # add learable pos encoding
         if not self.pe_fix:
@@ -367,16 +433,19 @@ class MVT(nn.Module):
                 x = self_ff(x) + x
 
         elif self.self_cross_ver == 1:
-            lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]
+            # lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:] -> Use tokens for each image.
 
             # within image self attention
-            imgx = imgx.reshape(bs * num_img, num_pat_img * num_pat_img, -1)
+            attention_weights = []
+            x = x.reshape(bs * num_img, num_pat_img * num_pat_img + num_lang_tok, -1)
             for self_attn, self_ff in self.layers[: len(self.layers) // 2]:
-                imgx = self_attn(imgx) + imgx
-                imgx = self_ff(imgx) + imgx
+                out, attn_weight = self_attn(x, get_weights=True)
+                attention_weights.append(attn_weight.detach())
+                x = out + x
+                x = self_ff(x) + x
 
-            imgx = imgx.view(bs, num_img * num_pat_img * num_pat_img, -1)
-            x = torch.cat((lx, imgx), dim=1)
+            x = x.view(bs, num_img * (num_pat_img * num_pat_img + num_lang_tok), -1)
+            # x = torch.cat((lx, imgx), dim=1)
             # cross attention
             for self_attn, self_ff in self.layers[len(self.layers) // 2 :]:
                 x = self_attn(x) + x
@@ -385,15 +454,31 @@ class MVT(nn.Module):
         else:
             assert False
 
-        # append language features as sequence
         if self.add_lang:
             # throwing away the language embeddings
-            x = x[:, num_lang_tok:]
+            x = x[:, num_img * num_lang_tok:]
+
+        # -- Two decoders ---
+
+        # First one for sequence of joint absolute positions
+        memory = x.transpose(0, 1)
+
+        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
+        tgt = torch.zeros_like(query_embed)
+        pos = self.pos_embed_decoder.transpose(0, 1).repeat(1, bs, 1)
+
+        hs = self.decoder(tgt=tgt, memory=memory, pos=pos, query_pos=query_embed)
+        hs = hs.transpose(1, 2)[0]  # Get last layer output
+
+        a_hat = self.action_head(hs)
+        is_pad_hat = self.is_pad_head(hs)
+
+        # Second one for 3D translation - rotation
         x = self.fc_aft_attn(x)
 
         # reshape back to orginal size
-        x = x.view(bs, *ins_orig_shape[1:-1], x.shape[-1])  # [B, num_img, np, np, 128]
-        x = rearrange(x, "b ... d -> b d ...")  # [B, 128, num_img, np, np]
+        x = x.view(bs, *ins_orig_shape[1:-1], x.shape[-1])  # [B, num_img, np, np, 192]
+        x = rearrange(x, "b ... d -> b d ...")  # [B, 192, num_img, np, np]
 
         feat = []
         _feat = torch.max(torch.max(x, dim=-1)[0], dim=-1)[0]
@@ -419,13 +504,24 @@ class MVT(nn.Module):
             bs * self.num_img, 1, h, w
         )
 
+        if self.debug:
+            debug_hm = hm.view(bs, self.num_img, h, w)
+            self.video_recorder.record(
+                img=original_img,
+                attn=attention_weights,
+                num_lang_tokens=num_lang_tok,
+                num_pat_img=num_pat_img,
+                num_heads=self.attn_heads,
+                heatmap=debug_hm,
+            )
+
         _feat = torch.sum(hm * u, dim=[2, 3])
         _feat = _feat.view(bs, -1)
         feat.append(_feat)
         feat = torch.cat(feat, dim=-1)
         feat = self.feat_fc(feat)
 
-        out = {"trans": trans, "feat": feat}
+        out = {"trans": trans, "feat": feat, "actions": a_hat, "is_pad": is_pad_hat}
 
         return out
 

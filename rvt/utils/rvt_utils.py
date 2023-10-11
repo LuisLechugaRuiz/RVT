@@ -284,8 +284,19 @@ def load_agent(agent_path, agent=None, only_epoch=False):
                     "WARNING: loading states with strick=False! "
                     "KNOW WHAT YOU ARE DOING!!"
                 )
-                # We need strict False as now rvt_agent as parameters from act. In a future we should split both.
-                model.load_state_dict(checkpoint["model_state"], strict=False)
+                # Load the pre-trained state dict without errors for shape mismatches
+                pretrained_state_dict = checkpoint["model_state"]
+
+                # Get the state dict of your current model (with its initialized weights)
+                current_state_dict = model.state_dict()
+
+                # Update current_state_dict with weights from pretrained_state_dict
+                new_state_dict = update_state_dict_with_partial_copy(pretrained_state_dict, current_state_dict)
+
+                # Load this new state dict into your model
+                model.load_state_dict(new_state_dict)
+
+                return epoch  # Don't update optimizer and lr_sched
 
         if "optimizer_state" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -302,3 +313,34 @@ def load_agent(agent_path, agent=None, only_epoch=False):
             )
 
     return epoch
+
+
+def update_state_dict_with_partial_copy(pretrained_state_dict, model_state_dict):
+    for name, param in model_state_dict.items():
+        if name in pretrained_state_dict:
+            # Shape of the parameter in the pretrained model
+            pre_shape = pretrained_state_dict[name].shape
+
+            # Shape of the parameter in the current model
+            cur_shape = param.shape
+
+            # Identify which dimensions are mismatched
+            mismatch_dims = [i for i, (d1, d2) in enumerate(zip(pre_shape, cur_shape)) if d1 != d2]
+
+            # If no mismatch, simply copy
+            if not mismatch_dims:
+                model_state_dict[name] = pretrained_state_dict[name]
+            else:
+                # Copy weights for matched dimensions
+                slicer = [slice(min(d1, d2)) for d1, d2 in zip(pre_shape, cur_shape)]
+                model_state_dict[name][tuple(slicer)] = pretrained_state_dict[name][tuple(slicer)]
+
+                # Initialize the additional dimensions in the current model using the chosen initializer
+                for dim in mismatch_dims:
+                    slicer[dim] = slice(pre_shape[dim], None)
+                    if len(model_state_dict[name][tuple(slicer)].shape) >= 2:
+                        torch.nn.init.kaiming_uniform_(model_state_dict[name][tuple(slicer)], mode='fan_in', nonlinearity='relu')
+                    else:
+                        torch.nn.init.normal_(model_state_dict[name][tuple(slicer)], mean=0, std=0.01)
+
+    return model_state_dict
