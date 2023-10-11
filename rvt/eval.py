@@ -20,10 +20,9 @@ from copy import deepcopy
 from rlbench.backend import task as rlbench_task
 from rlbench.backend.utils import task_file_to_task_class
 from rlbench.action_modes.gripper_action_modes import Discrete
-from rlbench.action_modes.action_mode import MoveArmThenGripper
+from rlbench.action_modes.arm_action_modes import JointPosition
 from yarr.utils.rollout_generator import RolloutGenerator
 from yarr.utils.stat_accumulator import SimpleAccumulator
-from yarr.utils.log_writer import LogWriter
 from yarr.agents.agent import VideoSummary
 
 import rvt.mvt.config as default_mvt_cfg
@@ -50,10 +49,10 @@ from rvt.utils.rvt_utils import (
 from rvt.utils.rvt_utils import load_agent as load_agent_state
 
 # ACT:
-from general_manipulation.act_executor import ACTExecutor
-from general_manipulation.act_action_mode import ACTActionMode
+from general_manipulation.helpers.act_executor import ACTExecutor
+from general_manipulation.helpers.act_action_mode import ACTActionMode
 from general_manipulation.utils.load_agents import get_act_agent
-from rlbench.action_modes.arm_action_modes import JointPosition
+import general_manipulation.config.act_config as default_act_cfg
 
 
 def load_agent(
@@ -141,7 +140,12 @@ def load_agent(
 
             mvt_cfg.freeze()
 
+            act_cfg = default_act_cfg.get_cfg_defaults()
+            act_cfg.freeze()
+            act_cfg_dict = yaml.safe_load(act_cfg.dump())
+
             rvt = MVT(
+                act_cfg_dict=act_cfg_dict,
                 renderer_device=device,
                 **mvt_cfg,
             )
@@ -233,7 +237,7 @@ def eval(
         "camera_names": CAMERAS,
     }
     # load policy and stats
-    ckpt_dir = DATA_FOLDER + "/act_checkpoint"
+    ckpt_dir = DATA_FOLDER + "/act_checkpoint/stage0" # TODO: Add stage as a parameter
     ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
     print(policy_config)
     stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
@@ -241,11 +245,10 @@ def eval(
         with open(stats_path, "rb") as f:
             norm_stats = pickle.load(f)
             print("DEBUG NORM_STATS:", norm_stats)
-    act_agent = get_act_agent(device=device)
+    act_agent = get_act_agent(norm_stats=norm_stats, device=device)
     loading_status = act_agent.act_model.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
-    # act_executor = ACTExecutor(act_agent, norm_stats, state_dim, num_queries)
-    act_executor = ACTExecutor(act_agent, state_dim, num_queries)  # TODO: Add norm stats
+    act_executor = ACTExecutor(act_agent, state_dim, num_queries)
     gripper_mode = Discrete()
     arm_action_mode = JointPosition(True)
     # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)

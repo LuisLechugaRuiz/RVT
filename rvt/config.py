@@ -9,7 +9,7 @@ _C = CN()
 _C.agent = "our"
 _C.tasks = "insert_onto_square_peg,open_drawer,place_wine_at_rack_location,light_bulb_in"
 _C.exp_id = "def"
-_C.resume = ""
+_C.resume = "runs/rvt/model_14.pth"  # pre-trained checkpoint path
 # bs per device, effective bs is scaled by num device
 _C.bs = 4
 _C.epochs = 20

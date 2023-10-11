@@ -30,6 +30,7 @@ from rvt.libs.peract.helpers.utils import extract_obs
 
 
 def create_replay(
+    action_chunk_size: int,
     batch_size: int,
     timesteps: int,
     disk_saving: bool,
@@ -45,6 +46,7 @@ def create_replay(
     max_token_seq_len = 77
     lang_feat_dim = 1024
     lang_emb_dim = 512
+    joint_positions_size = 7
 
     # low_dim_state
     observation_elements = []
@@ -128,17 +130,20 @@ def create_replay(
             ReplayElement(
                 "lang_goal", (1,), object
             ),  # language goal string for debugging and visualization
+            ReplayElement("joint_positions", (joint_positions_size,), np.float32),
+            ReplayElement("actions", (action_chunk_size, joint_positions_size), np.float32),
+            ReplayElement("is_pad", (action_chunk_size,), bool),
         ]
     )
 
-    extra_replay_elements = [
-        ReplayElement("demo", (), bool),
-        ReplayElement("keypoint_idx", (), int),
-        ReplayElement("episode_idx", (), int),
-        ReplayElement("keypoint_frame", (), int),
-        ReplayElement("next_keypoint_frame", (), int),
-        ReplayElement("sample_frame", (), int),
-    ]
+    # extra_replay_elements = [
+    #    ReplayElement("demo", (), bool),
+    #    ReplayElement("keypoint_idx", (), int),
+    #    ReplayElement("episode_idx", (), int),
+    #    ReplayElement("keypoint_frame", (), int),
+    #    ReplayElement("next_keypoint_frame", (), int),
+    #    ReplayElement("sample_frame", (), int),
+    #]
 
     replay_buffer = (
         UniformReplayBuffer(  # all tuples in the buffer have equal sample weighting
@@ -152,7 +157,7 @@ def create_replay(
             reward_dtype=np.float32,
             update_horizon=1,
             observation_elements=observation_elements,
-            extra_replay_elements=extra_replay_elements,
+            # extra_replay_elements=extra_replay_elements,
         )
     )
     return replay_buffer
@@ -218,6 +223,7 @@ def create_act_replay(
             ReplayElement("joint_positions", (joint_positions_size,), np.float32),
             ReplayElement("actions", (20, joint_positions_size), np.float32),
             ReplayElement("is_pad", (20,), bool),
+            ReplayElement("action_last_pose", (7,), np.float32),
             ReplayElement("target_pose", (7,), np.float32)
         ]
     )
@@ -241,28 +247,21 @@ def create_act_replay(
 # discretize translation, rotation, gripper open, and ignore collision actions
 def _get_action(
     obs_tp1: Observation,
-    obs_tm1: Observation,
     rlbench_scene_bounds: List[float],  # metric 3D bounds of the scene
     voxel_sizes: List[int],
     rotation_resolution: int,
-    crop_augmentation: bool,
 ):
     quat = utils.normalize_quaternion(obs_tp1.gripper_pose[3:])
     if quat[-1] < 0:
         quat = -quat
     disc_rot = utils.quaternion_to_discrete_euler(quat, rotation_resolution)
-    attention_coordinate = obs_tp1.gripper_pose[:3]
-    trans_indicies, attention_coordinates = [], []
+    trans_indicies = []
     bounds = np.array(rlbench_scene_bounds)
-    ignore_collisions = int(obs_tm1.ignore_collisions)
     for depth, vox_size in enumerate(
         voxel_sizes
     ):  # only single voxelization-level is used in PerAct
         index = utils.point_to_voxel_index(obs_tp1.gripper_pose[:3], vox_size, bounds)
         trans_indicies.extend(index.tolist())
-        res = (bounds[3:] - bounds[:3]) / vox_size
-        attention_coordinate = bounds[:3] + res * index
-        attention_coordinates.append(attention_coordinate)
 
     rot_and_grip_indicies = disc_rot.tolist()
     grip = float(obs_tp1.gripper_open)
@@ -270,9 +269,7 @@ def _get_action(
     return (
         trans_indicies,
         rot_and_grip_indicies,
-        ignore_collisions,
-        np.concatenate([obs_tp1.gripper_pose, np.array([grip])]),
-        attention_coordinates,
+        np.concatenate([obs_tp1.gripper_pose, np.array([grip])])
     )
 
 
@@ -294,17 +291,16 @@ def _clip_encode_text(clip_model, text):
     return x, emb
 
 
+# TODO: ADAPT THIS TO GET CONTINUOUS DATA!
+
 # add individual data points to a replay
 def _add_keypoints_to_replay(
     replay: ReplayBuffer,
     task: str,
     task_replay_storage_folder: str,
-    episode_idx: int,
-    sample_frame: int,
     inital_obs: Observation,
     demo: Demo,
     episode_keypoints: List[int],
-    cameras: List[str],
     rlbench_scene_bounds: List[float],
     voxel_sizes: List[int],
     rotation_resolution: int,
@@ -355,27 +351,25 @@ def _add_keypoints_to_replay(
 
         prev_action = np.copy(action)
 
-        if k == 0:
-            keypoint_frame = -1
-        else:
-            keypoint_frame = episode_keypoints[k - 1]
-        others = {
-            "demo": True,
-            "keypoint_idx": k,
-            "episode_idx": episode_idx,
-            "keypoint_frame": keypoint_frame,
-            "next_keypoint_frame": keypoint,
-            "sample_frame": sample_frame,
-        }
+        # if k == 0:
+        #    keypoint_frame = -1
+        #else:
+        #    keypoint_frame = episode_keypoints[k - 1]
+        # others = {
+        #    "demo": True,
+        #    "keypoint_idx": k,
+        #    "episode_idx": episode_idx,
+        #    "keypoint_frame": keypoint_frame,
+        #    "next_keypoint_frame": keypoint,
+        #    "sample_frame": sample_frame,
+        #}
         final_obs = {
             "trans_action_indicies": trans_indicies,
             "rot_grip_action_indicies": rot_grip_indicies,
             "gripper_pose": obs_tp1.gripper_pose,
             "lang_goal": np.array([description], dtype=object),
         }
-
-        others.update(final_obs)
-        others.update(obs_dict)
+        obs_dict.update(final_obs)
 
         timeout = False
         replay.add(
@@ -405,19 +399,134 @@ def _add_keypoints_to_replay(
     replay.add_final(task, task_replay_storage_folder, **obs_dict_tp1)
 
 
+def _add_keypoints_to_replay_tmp(
+    replay: ReplayBuffer,
+    task: str,
+    task_replay_storage_folder: str,
+    demo: Demo,
+    episode_keypoints: List[int],
+    action_chunk_size: int,
+    rlbench_scene_bounds: List[float],
+    voxel_sizes: List[int],
+    rotation_resolution: int,
+    description: str = "",
+    clip_model=None,
+    device="cpu",
+):
+    k = 0
+    for i in range(len(demo)):
+        if i == episode_keypoints[k] or i == 0:
+            if k < len(episode_keypoints) - 1:
+                # Get keypoint action
+                keypoint = episode_keypoints[k]
+                obs_tp1 = demo[keypoint]
+                (
+                    trans_indicies,
+                    rot_grip_indicies,
+                    action,
+                ) = _get_action(
+                    obs_tp1,
+                    rlbench_scene_bounds,
+                    voxel_sizes,
+                    rotation_resolution,
+                )
+                k += 1
+
+        terminal = i == len(demo) - 1
+        reward = float(terminal) * 1.0 if terminal else 0
+
+        obs = demo[i]
+        obs_dict = extract_obs(
+            obs,
+            CAMERAS,
+            t=k,
+            episode_length=25,
+        )
+        tokens = clip.tokenize([description]).numpy()
+        token_tensor = torch.from_numpy(tokens).to(device)
+        with torch.no_grad():
+            lang_feats, lang_embs = _clip_encode_text(clip_model, token_tensor)
+        obs_dict["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
+
+        #if k == 0:
+        #    keypoint_frame = -1
+        #else:
+        #    keypoint_frame = episode_keypoints[k - 1]
+        # others = {
+        #    "demo": True,
+        #    "keypoint_idx": k,
+        #    "episode_idx": episode_idx,
+        #    "keypoint_frame": keypoint_frame,
+        #    "next_keypoint_frame": keypoint,
+        #    "sample_frame": sample_frame,
+        #}
+
+        final_obs = {
+            "trans_action_indicies": trans_indicies,
+            "rot_grip_action_indicies": rot_grip_indicies,
+            "gripper_pose": obs_tp1.gripper_pose,
+            "lang_goal": np.array([description], dtype=object),
+        }
+        # -------------------
+        # Get joint position actions
+        last_index = min(i + action_chunk_size, episode_keypoints[k])
+        if i < len(demo) - 1:
+            target_actions = [i.joint_positions for i in demo[i+1:last_index]]
+        else:
+            target_actions = []
+        is_pad = [False] * len(target_actions)
+        # Ensure target_actions size is action_chunk_size
+        difference = action_chunk_size - len(target_actions)
+        if len(target_actions) > 0:
+            target_actions += [target_actions[-1]] * difference
+        else:
+            target_actions = [demo[i].joint_positions] * difference
+        # Padding to true as we are filling with duplicated data.
+        is_pad += [True] * difference
+
+        extra_obs = {
+            "joint_positions": obs.joint_positions,
+            "actions": target_actions,
+            "is_pad": is_pad,
+        }
+        obs_dict.update(final_obs)
+        obs_dict.update(extra_obs)
+
+        timeout = False
+        replay.add(
+            task,
+            task_replay_storage_folder,
+            action,
+            reward,
+            terminal,
+            timeout,
+            **obs_dict
+        )
+    # final step
+    obs_dict_tp1 = extract_obs(
+        obs_tp1,
+        CAMERAS,
+        t=k,
+        episode_length=25,
+    )
+    obs_dict_tp1["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
+
+    obs_dict_tp1.pop("wrist_world_to_cam", None)
+    obs_dict_tp1.update(final_obs)
+    obs_dict_tp1.update(extra_obs)
+    replay.add_final(task, task_replay_storage_folder, **obs_dict_tp1)
+
+
 def fill_replay(
     replay: ReplayBuffer,
     task: str,
     task_replay_storage_folder: str,
     start_idx: int,
     num_demos: int,
-    demo_augmentation: bool,
-    demo_augmentation_every_n: int,
-    cameras: List[str],
+    action_chunk_size: str,
     rlbench_scene_bounds: List[float],  # AKA: DEPTH0_BOUNDS
     voxel_sizes: List[int],
     rotation_resolution: int,
-    crop_augmentation: bool,
     data_path: str,
     episode_folder: str,
     variation_desriptions_pkl: str,
@@ -458,42 +567,21 @@ def fill_replay(
 
             # extract keypoints
             episode_keypoints = keypoint_discovery(demo)
-            next_keypoint_idx = 0
-            for i in range(len(demo) - 1):
-                if not demo_augmentation and i > 0:
-                    break
-                if i % demo_augmentation_every_n != 0:  # choose only every n-th frame
-                    continue
-
-                obs = demo[i]
-                desc = descs[0]
-                # if our starting point is past one of the keypoints, then remove it
-                while (
-                    next_keypoint_idx < len(episode_keypoints)
-                    and i >= episode_keypoints[next_keypoint_idx]
-                ):
-                    next_keypoint_idx += 1
-                if next_keypoint_idx == len(episode_keypoints):
-                    break
-                _add_keypoints_to_replay(
-                    replay,
-                    task,
-                    task_replay_storage_folder,
-                    d_idx,
-                    i,
-                    obs,
-                    demo,
-                    episode_keypoints,
-                    cameras,
-                    rlbench_scene_bounds,
-                    voxel_sizes,
-                    rotation_resolution,
-                    crop_augmentation,
-                    next_keypoint_idx=next_keypoint_idx,
-                    description=desc,
-                    clip_model=clip_model,
-                    device=device,
-                )
+            demo, episode_keypoints = clean_samples(demo, episode_keypoints)
+            _add_keypoints_to_replay_tmp(
+                replay,
+                task,
+                task_replay_storage_folder,
+                demo,
+                episode_keypoints,
+                action_chunk_size,
+                rlbench_scene_bounds,
+                voxel_sizes,
+                rotation_resolution,
+                description=descs[0],
+                clip_model=clip_model,
+                device=device,
+            )
 
         # save TERMINAL info in replay_info.npy
         task_idx = replay._task_index[task]
@@ -527,6 +615,7 @@ def fill_act_replay(
     print("Storage:", task_replay_storage_folder)
     print("data_path", data_path)
     disk_exist = False
+    
     if replay._disk_saving:
         if os.path.exists(task_replay_storage_folder):
             print(
@@ -622,6 +711,7 @@ def _add_joint_positions(
             "joint_positions": obs.joint_positions,
             "actions": target_actions,
             "is_pad": is_pad,
+            "action_last_pose": demo[last_index].gripper_pose,
             "target_pose": target_pose
         }
         obs_dict.update(extra_obs)
@@ -644,6 +734,7 @@ def _add_joint_positions(
         "joint_positions": demo[-1].joint_positions,
         "actions": [demo[-1].joint_positions] * action_chunk_size,
         "is_pad": [True] + [False] * (action_chunk_size - 1),
+        "action_last_pose": demo[last_index].gripper_pose,
         "target_pose": target_pose
     }
     obs_dict.update(final_obs)

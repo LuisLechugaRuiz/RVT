@@ -25,6 +25,7 @@ from yarr.replay_buffer.wrappers.pytorch_replay_buffer import PyTorchReplayBuffe
 
 def get_dataset(
     tasks,
+    action_chunk_size,
     BATCH_SIZE_TRAIN,
     BATCH_SIZE_TEST,
     TRAIN_REPLAY_STORAGE_DIR,
@@ -40,6 +41,7 @@ def get_dataset(
 ):
 
     train_replay_buffer = create_replay(
+        action_chunk_size,
         batch_size=BATCH_SIZE_TRAIN,
         timesteps=1,
         disk_saving=True,
@@ -48,6 +50,7 @@ def get_dataset(
     )
     if not only_train:
         test_replay_buffer = create_replay(
+            action_chunk_size,
             batch_size=BATCH_SIZE_TEST,
             timesteps=1,
             disk_saving=True,
@@ -94,13 +97,10 @@ def get_dataset(
             task_replay_storage_folder=train_replay_storage_folder,
             start_idx=0,
             num_demos=NUM_TRAIN,
-            demo_augmentation=True,
-            demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
-            cameras=CAMERAS,
+            action_chunk_size=action_chunk_size,
             rlbench_scene_bounds=SCENE_BOUNDS,
             voxel_sizes=VOXEL_SIZES,
             rotation_resolution=ROTATION_RESOLUTION,
-            crop_augmentation=False,
             data_path=data_path_train,
             episode_folder=EPISODE_FOLDER,
             variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
@@ -116,13 +116,10 @@ def get_dataset(
                 task_replay_storage_folder=test_replay_storage_folder,
                 start_idx=0,
                 num_demos=NUM_VAL,
-                demo_augmentation=True,
-                demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
-                cameras=CAMERAS,
+                action_chunk_size=action_chunk_size,
                 rlbench_scene_bounds=SCENE_BOUNDS,
                 voxel_sizes=VOXEL_SIZES,
                 rotation_resolution=ROTATION_RESOLUTION,
-                crop_augmentation=False,
                 data_path=data_path_val,
                 episode_folder=EPISODE_FOLDER,
                 variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,

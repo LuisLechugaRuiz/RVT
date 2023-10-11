@@ -96,7 +96,7 @@ class Attention(nn.Module):  # is all you need. Living up to its name.
         # dropout left in use_fast for backward compatibility
         self.dropout = nn.Dropout(self.dropout_p)
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, get_weights=None):
         h = self.heads
 
         q = self.to_q(x)
@@ -112,12 +112,18 @@ class Attention(nn.Module):  # is all you need. Living up to its name.
             sim.masked_fill_(~mask, max_neg_value)
         # attention
         attn = sim.softmax(dim=-1)
+        attn_qk = attn
+
         # dropout
         attn = self.dropout(attn)
         out = einsum("b i j, b j d -> b i d", attn, v)
 
         out = rearrange(out, "(b h) n d -> b n (h d)", h=h)
         out = self.to_out(out)
+
+        if get_weights:
+            return out, attn_qk
+
         return out
 
 
