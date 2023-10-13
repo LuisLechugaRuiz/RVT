@@ -417,6 +417,8 @@ def _add_keypoints_to_replay_tmp(
     for i in range(len(demo)):
         if i == episode_keypoints[k] or i == 0:
             if k < len(episode_keypoints) - 1:
+                if i != 0:
+                    k += 1
                 # Get keypoint action
                 keypoint = episode_keypoints[k]
                 obs_tp1 = demo[keypoint]
@@ -430,7 +432,6 @@ def _add_keypoints_to_replay_tmp(
                     voxel_sizes,
                     rotation_resolution,
                 )
-                k += 1
 
         terminal = i == len(demo) - 1
         reward = float(terminal) * 1.0 if terminal else 0
@@ -615,7 +616,7 @@ def fill_act_replay(
     print("Storage:", task_replay_storage_folder)
     print("data_path", data_path)
     disk_exist = False
-    
+
     if replay._disk_saving:
         if os.path.exists(task_replay_storage_folder):
             print(

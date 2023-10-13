@@ -21,6 +21,7 @@ from rlbench.backend import task as rlbench_task
 from rlbench.backend.utils import task_file_to_task_class
 from rlbench.action_modes.gripper_action_modes import Discrete
 from rlbench.action_modes.arm_action_modes import JointPosition
+from rlbench.action_modes.arm_action_modes import EndEffectorPoseViaPlanning  # TODO: REMOVE
 from yarr.utils.rollout_generator import RolloutGenerator
 from yarr.utils.stat_accumulator import SimpleAccumulator
 from yarr.agents.agent import VideoSummary
@@ -208,7 +209,7 @@ def eval(
     camera_resolution = [IMAGE_SIZE, IMAGE_SIZE]
     obs_config = utils.create_obs_config(CAMERAS, camera_resolution, method_name="")
 
-    # ACT:
+    # TODO: REMOVE ACT CONFIGS.
     # fixed parameters # TODO: Get this info from Config, remove script vars.
     state_dim = 7
     num_queries = 20
@@ -237,22 +238,22 @@ def eval(
         "camera_names": CAMERAS,
     }
     # load policy and stats
-    ckpt_dir = DATA_FOLDER + "/act_checkpoint/stage0" # TODO: Add stage as a parameter
-    ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
-    print(policy_config)
-    stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
-    if os.path.exists(stats_path):
-        with open(stats_path, "rb") as f:
-            norm_stats = pickle.load(f)
-            print("DEBUG NORM_STATS:", norm_stats)
-    act_agent = get_act_agent(norm_stats=norm_stats, device=device)
-    loading_status = act_agent.act_model.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
-    act_executor = ACTExecutor(act_agent, state_dim, num_queries)
+    # ckpt_dir = DATA_FOLDER + "/act_checkpoint/stage0" # TODO: Add stage as a parameter
+    # ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
+    # print(policy_config)
+    # stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
+    # if os.path.exists(stats_path):
+    #    with open(stats_path, "rb") as f:
+    #        norm_stats = pickle.load(f)
+    #        print("DEBUG NORM_STATS:", norm_stats)
+    # act_agent = get_act_agent(norm_stats=norm_stats, device=device)
+    # loading_status = act_agent.act_model.load_state_dict(torch.load(ckpt_path))
+    # print(loading_status)
+    # act_executor = ACTExecutor(act_agent, state_dim, num_queries)
     gripper_mode = Discrete()
-    arm_action_mode = JointPosition(True)
-    # action_mode = MoveArmThenGripper(arm_action_mode, gripper_mode)
-    action_mode = ACTActionMode(arm_action_mode, gripper_mode, act_executor)
+    arm_action_mode = JointPosition(absolute_mode=True) # -> TODO: ENABLE
+    # arm_action_mode = EndEffectorPoseViaPlanning()
+    action_mode = ACTActionMode(arm_action_mode, gripper_mode, state_dim, num_queries, device)
     task_files = [
         t.replace(".py", "")
         for t in os.listdir(rlbench_task.TASKS_PATH)

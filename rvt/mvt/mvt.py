@@ -216,6 +216,7 @@ class MVT(nn.Module):
         proprio_joint_pos=None,
         lang_emb=None,
         img_aug=0,
+        terminal=None,
     ):
         """
         :param pc: list of tensors, each tensor of shape (num_points, 3)
@@ -225,6 +226,7 @@ class MVT(nn.Module):
         :param proprio_joint_pos: tensor of shape (bs, proprio_joint_pos_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         :param img_aug: (float) magnitude of augmentation in rgb image
+        :param terminal: (bs, bool) whether the episode is over
         """
 
         self.verify_inp(pc, img_feat, proprio_cartesian, lang_emb, img_aug)
@@ -234,7 +236,7 @@ class MVT(nn.Module):
             img_aug,
             dyn_cam_info=None,
         )
-        mvt_out = self.mvt1(img=img, proprio_cartesian=proprio_cartesian, proprio_joint_pos=proprio_joint_pos, lang_emb=lang_emb)
+        mvt_out = self.mvt1(img=img, proprio_cartesian=proprio_cartesian, proprio_joint_pos=proprio_joint_pos, lang_emb=lang_emb, terminal=terminal)
         return mvt_out
 
     def free_mem(self):

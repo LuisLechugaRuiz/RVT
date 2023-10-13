@@ -15,6 +15,7 @@ from rvt.mvt.attn import (
     Conv2DUpsampleBlock,
     PreNorm,
     Attention,
+    MemoryAttention,
     cache_fn,
     DenseBlock,
     FeedForward,
@@ -335,12 +336,14 @@ class MVT(nn.Module):
         proprio_cartesian=None,
         proprio_joint_pos=None,
         lang_emb=None,
+        terminal=None,
     ):
         """
         :param img: tensor of shape (bs, num_img, img_feat_dim, h, w)
         :param proprio_cartesian: tensor of shape (bs, proprio_cartesian_dim)
         :param proprio_joint_pos: tensor of shape (bs, proprio_joint_pos_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
+        :param terminal: tensor of shape (bs, 1)
         """
 
         original_img = img
@@ -418,7 +421,8 @@ class MVT(nn.Module):
             )
             l = l.view(bs, self.lang_max_seq_len, -1)
             num_lang_tok = l.shape[1]
-            ins = torch.cat((l, ins), dim=1)  # [B, num_img * np * np + 77, 192]
+            l_repeated = l.unsqueeze(1).repeat(1, num_img, 1, 1).view(bs, num_img * num_lang_tok, -1)
+            ins = torch.cat((l_repeated, ins), dim=1)  # [B, num_img * np * np + num_img * lang_max_seq_len, 192]
 
         # add learable pos encoding
         if not self.pe_fix:
@@ -432,39 +436,36 @@ class MVT(nn.Module):
                 x = self_ff(x) + x
 
         elif self.self_cross_ver == 1:
-            lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]
+            # lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:] -> Use tokens for each image.
 
             # within image self attention
             attention_weights = []
-            imgx = imgx.reshape(bs * num_img, num_pat_img * num_pat_img, -1)
+            # print("X SHAPE:", x.shape)
+            x = x.reshape(bs * num_img, num_pat_img * num_pat_img + num_lang_tok, -1)
             for self_attn, self_ff in self.layers[: len(self.layers) // 2]:
-                out, attn_weight = self_attn(imgx, get_weights=True)
+                out, attn_weight = self_attn(x, get_weights=True)
                 attention_weights.append(attn_weight.detach())
-                imgx = out + imgx
-                imgx = self_ff(imgx) + imgx
+                x = out + x
+                x = self_ff(x) + x
 
-            # visualize image + attention
-            if self.debug:
-                self.video_recorder.record(
-                    img=original_img,
-                    attn=attention_weights,
-                    num_pat_img=num_pat_img,
-                    num_heads=self.attn_heads,
-                )
-
-            imgx = imgx.view(bs, num_img * num_pat_img * num_pat_img, -1)
-            x = torch.cat((lx, imgx), dim=1)
+            x = x.view(bs, num_img * (num_pat_img * num_pat_img + num_lang_tok), -1)
+            # x = torch.cat((lx, imgx), dim=1)
             # cross attention
             for self_attn, self_ff in self.layers[len(self.layers) // 2 :]:
                 x = self_attn(x) + x
                 x = self_ff(x) + x
+
+            # reset_memory = torch.nonzero(terminal)
+            # for i in reset_memory:
+            #    for attn, ff in self.layers:
+            #        attn.fn.reset_memory(i)
 
         else:
             assert False
 
         if self.add_lang:
             # throwing away the language embeddings
-            x = x[:, num_lang_tok:]
+            x = x[:, num_img * num_lang_tok:]
 
         # -- Two decoders ---
 
@@ -511,6 +512,16 @@ class MVT(nn.Module):
         hm = F.softmax(trans.detach().view(bs, self.num_img, h * w), 2).view(
             bs * self.num_img, 1, h, w
         )
+
+        if self.debug:
+            debug_hm = hm.view(bs, self.num_img, h, w)
+            self.video_recorder.record(
+                img=original_img,
+                attn=attention_weights,
+                num_pat_img=num_pat_img,
+                num_heads=self.attn_heads,
+                heatmap=debug_hm,
+            )
 
         _feat = torch.sum(hm * u, dim=[2, 3])
         _feat = _feat.view(bs, -1)

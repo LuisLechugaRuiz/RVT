@@ -24,6 +24,8 @@ from yarr.agents.agent import ActResult
 from rvt.utils.dataset import _clip_encode_text
 from rvt.utils.lr_sched_utils import GradualWarmupScheduler
 
+import cv2  # DEBUG
+
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -364,6 +366,9 @@ class RVTAgent:
         self._training = training
         self._device = device
 
+        if self._training:
+            self._network.mvt1.debug = False
+
         if self._optimizer_type == "lamb":
             # From: https://github.com/cybertronai/pytorch-lamb/blob/master/pytorch_lamb/lamb.py
             self._optimizer = Lamb(
@@ -542,6 +547,7 @@ class RVTAgent:
                 pcd,
             )
 
+            self._transform_augmentation = False
             if self._transform_augmentation and backprop:
                 action_trans_con, action_rot, pc = apply_se3_aug_con(
                     pcd=pc,
@@ -608,6 +614,7 @@ class RVTAgent:
             proprio_joint_pos=proprio_joint_pos,
             lang_emb=lang_goal_embs,
             img_aug=img_aug,
+            terminal=replay_sample["terminal"],
         )
 
         q_trans, rot_q, grip_q, collision_q, y_q, pts = self.get_q(
@@ -627,6 +634,21 @@ class RVTAgent:
             wpt_local, pts, out, dyn_cam_info, dims=(bs, nc, h, w)
         )
         pred_actions = out["actions"]
+
+        q_hm = torch.nn.functional.softmax(q_trans, 1)
+        debug_q = q_hm.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        debug_a = action_trans.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        bs = len(pc)
+        nc = self._net_mod.num_img
+        h = w = self._net_mod.img_size
+        for b in range(bs):
+            for n in range(nc):
+                n_q = cv2.normalize(debug_q[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                n_a = cv2.normalize(debug_a[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                time = proprio_cartesian[b, 3]
+                # cv2.imwrite(f"pred_batch{b}_img{n}_time{time}.png", n_q)
+                # cv2.imwrite(f"gt_batch{b}_img{n}_time{time}.png", n_a)
+
 
         loss_log = {}
         if backprop:
@@ -705,6 +727,7 @@ class RVTAgent:
         if eval_log:
             with torch.no_grad():
                 wpt = torch.cat([x.unsqueeze(0) for x in wpt])
+                self._net_mod.free_mem()
                 pred_wpt, pred_rot_quat, _, _ = self.get_pred(
                     out,
                     rot_q,
@@ -737,7 +760,7 @@ class RVTAgent:
 
     @torch.no_grad()
     def act(
-        self, step: int, observation: dict, deterministic=True, pred_distri=False
+        self, step: int, observation: dict, deterministic=True, pred_distri=False, terminal=False
     ) -> ActResult:
         if self.add_lang:
             lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
@@ -751,6 +774,7 @@ class RVTAgent:
             )
         proprio_joint_pos = observation["joint_positions"].squeeze(1)  # (b, 7)
         proprio_cartesian = arm_utils.stack_on_channel(observation["low_dim_state"])
+        # print("DEBUG - CARTESIAN PROPRIO:", proprio_cartesian)
 
         obs, pcd = peract_utils._preprocess_inputs(observation, self.cameras)
         pc, img_feat = rvt_utils.get_pc_img_feat(
@@ -787,21 +811,34 @@ class RVTAgent:
             proprio_joint_pos=proprio_joint_pos,
             lang_emb=lang_goal_embs,
             img_aug=0,  # no img augmentation while acting
+            terminal=torch.tensor(terminal),
         )
-        _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
+        q_trans, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
             out, dims=(bs, nc, h, w), only_pred=True
         )
         pred_wpt, pred_rot_quat, pred_grip, pred_coll = self.get_pred(
             out, rot_q, grip_q, collision_q, y_q, rev_trans, dyn_cam_info
         )
 
-        # TODO: Concatenate act result -> out["act"]
+        # print("DEBUG - CARTESIAN PROPRIO:", proprio_cartesian)
+        q_hm = torch.nn.functional.softmax(q_trans, 1)
+        debug_q = q_hm.view(bs, h, w, nc).permute(0, 3, 1, 2)
+        bs = len(pc)
+        nc = self._net_mod.num_img
+        h = w = self._net_mod.img_size
+        for b in range(bs):
+            for n in range(nc):
+                n_q = cv2.normalize(debug_q[b, n].detach().cpu().numpy(), None, 0, 255, cv2.NORM_MINMAX)
+                time = proprio_cartesian[b, 3]
+                # cv2.imwrite(f"pred_batch{b}_img{n}_time{time}.png", n_q)
+
         continuous_action = np.concatenate(
             (
                 pred_wpt[0].cpu().numpy(),
                 pred_rot_quat[0],
                 pred_grip[0].cpu().numpy(),
                 pred_coll[0].cpu().numpy(),
+                out["actions"].cpu().numpy().ravel(),
             )
         )
         if pred_distri:
