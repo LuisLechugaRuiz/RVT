@@ -234,7 +234,7 @@ class MVT(nn.Module):
 
         get_attn_attn = lambda: PreNorm(
             attn_dim,
-            Attention(
+            MemoryAttention(
                 attn_dim,
                 heads=attn_heads,
                 dim_head=attn_dim_head,
@@ -455,10 +455,10 @@ class MVT(nn.Module):
                 x = self_attn(x) + x
                 x = self_ff(x) + x
 
-            # reset_memory = torch.nonzero(terminal)
-            # for i in reset_memory:
-            #    for attn, ff in self.layers:
-            #        attn.fn.reset_memory(i)
+            reset_memory = torch.nonzero(terminal)
+            for i in reset_memory:
+                for attn, ff in self.layers:
+                    attn.fn.reset_memory(i)
 
         else:
             assert False

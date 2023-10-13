@@ -135,7 +135,7 @@ def get_dataset(
     # wrap buffer with PyTorch dataset and make iterator
     train_wrapped_replay = PyTorchReplayBuffer(
         train_replay_buffer,
-        sample_mode="random",  # TODO: SET TO "random"
+        sample_mode="enumerate",  # Enumerate as we are training with memory.
         num_workers=num_workers,
         sample_distribution_mode=sample_distribution_mode,
     )

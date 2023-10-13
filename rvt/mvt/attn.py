@@ -127,6 +127,83 @@ class Attention(nn.Module):  # is all you need. Living up to its name.
         return out
 
 
+class MemoryAttention(nn.Module):  # maybe this is all we need -> Space - Time.
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0, memory_tokens=8):
+
+        super().__init__()
+        inner_dim = dim_head * heads
+        self.inner_dim = inner_dim
+        context_dim = default(context_dim, query_dim)
+        self.scale = dim_head**-0.5
+        self.heads = heads
+
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(context_dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, query_dim)
+
+        self.dropout_p = dropout
+        # dropout left in use_fast for backward compatibility
+        self.dropout = nn.Dropout(self.dropout_p)
+
+        # memory
+        self.memory = None
+        self.memory_tokens = memory_tokens
+
+    def forward(self, x, context=None, mask=None, get_weights=None):
+        # If memory hasn't been initialized yet, initialize it
+        if self.memory is None:
+            batch_size = x.size(0)
+            # TODO: Add to device
+            self.memory = nn.Parameter(1e-6 * torch.ones((batch_size, self.heads * self.memory_tokens, self.inner_dim)).cuda(), requires_grad=False)
+
+        h = self.heads
+
+        x_with_memory = torch.cat([x, self.memory], dim=1)
+
+        q = self.to_q(x_with_memory)
+        context = default(context, x_with_memory)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
+
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (q, k, v))
+        sim = einsum("b i d, b j d -> b i j", q, k) * self.scale
+        # print("SIM SHAPE:", sim.shape)
+
+        # TODO: Extract here memory tokens before softmax?
+
+        if exists(mask):
+            mask = rearrange(mask, "b ... -> b (...)")
+            max_neg_value = -torch.finfo(sim.dtype).max
+            mask = repeat(mask, "b j -> (b h) () j", h=h)
+            sim.masked_fill_(~mask, max_neg_value)
+        # attention
+        attn = sim.softmax(dim=-1)
+        # print("POST SOFTMAX SIM SHAPE:", attn.shape)
+        attn_qk = attn[:, :-self.memory.size(1), :-self.memory.size(1)]
+
+        # dropout
+        attn = self.dropout(attn)
+        out = einsum("b i j, b j d -> b i d", attn, v)
+        # print("PRE OUT SHAPE:", out.shape)
+        out = rearrange(out, "(b h) n d -> b n (h d)", h=h)
+        # print("POST OUT SHAPE:", out.shape)
+
+        # update memory tokens
+        self.memory.data = out[:, -self.memory.size(1):, :]  # Simple version.
+        # exclude memory tokens from output (since it's supposed to be internal to the model)
+        out = out[:, :-self.memory.size(1)]
+
+        out = self.to_out(out)
+
+        if get_weights:
+            return out, attn_qk
+
+        return out
+
+    def reset_memory(self, batch):
+        assert batch < self.memory.shape[0], "Batch index out of range."
+        self.memory[batch] = 1e-6 * torch.ones((self.heads * self.memory_tokens, self.inner_dim)).cuda()
+
+
 def act_layer(act):
     if act == "relu":
         return nn.ReLU()
